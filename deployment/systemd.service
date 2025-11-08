@@ -1,0 +1,15 @@
+[Unit]
+Description=Personal Automation Platform
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/personal-automation-platform
+Environment="PATH=/opt/personal-automation-platform/venv/bin"
+ExecStart=/opt/personal-automation-platform/venv/bin/python main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

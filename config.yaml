@@ -1,0 +1,91 @@
+modules:
+  nutrition:
+    enabled: true
+    daily_targets:
+      # Base targets (adjusted by training day)
+      protein_g: 150
+      fat_g: 60
+      fiber_g: 25
+      hydration_oz: 95
+      sleep_hours: 7.5
+      
+      # Calorie calculations
+      rest_day_baseline: 2150
+      deficit: 500  # Subtracted from (baseline + exercise_calories)
+      
+      # Recovery day range (high protein/glycogen debt)
+      recovery_calories_min: 2150
+      recovery_calories_max: 2200
+      
+      # Carb targets by training load
+      carbs:
+        rest:
+          min: 150
+          max: 180
+        moderate:  # 200-600 cal exercise
+          min: 200
+          max: 220
+        high:  # > 600 cal exercise
+          min: 230
+          max: 260
+    
+    # Custom foods (user-defined recipes)
+    custom_foods:
+      - name: smoothie_small
+        aliases:
+          - small smoothie
+          - small smoothie portion
+          - 13 oz smoothie
+          - small portion
+        calories: 225
+        protein_g: 24
+        carbs_g: 27
+        fat_g: 2.5
+        fiber_g: 7
+        notes: "13 oz portion (27.7% of batch)"
+      
+      - name: smoothie_large
+        aliases:
+          - large smoothie
+          - large smoothie portion
+          - 17 oz smoothie
+          - large portion
+        calories: 294
+        protein_g: 32
+        carbs_g: 36
+        fat_g: 3
+        fiber_g: 9
+        notes: "17 oz portion (36.2% of batch)"
+    
+    # Supplement reminders
+    supplements:
+      morning:
+        time: "07:00"
+        items:
+          - D3K2
+          - Fish Oil
+          - Creatine (10g)
+      evening:
+        time: "21:00"
+        items:
+          - Fish Oil
+    
+    # Daily summary time
+    daily_summary_time: "20:00"
+  
+  workout:
+    enabled: true
+    
+    # Electrolyte recommendation threshold
+    electrolyte_threshold_minutes: 45
+    
+    # Exercise intensity classification
+    intensity_thresholds:
+      light_max_minutes: 20
+      moderate_max_minutes: 45
+      # > 45 minutes = high intensity
+    
+    # Calorie burn thresholds for macro adjustment
+    calorie_thresholds:
+      moderate_min: 200
+      high_min: 600
