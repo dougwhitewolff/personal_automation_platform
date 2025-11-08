@@ -26,5 +26,5 @@ client.chat.completions.create(
         {"role": "user", "content": "Reply with only the word SUCCESS"}
     ],
     # IMPORTANT: correct parameter name
-    max_tokens=10
+    max_completion_tokens=1000
 )
