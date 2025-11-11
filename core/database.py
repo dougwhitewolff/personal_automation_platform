@@ -1,82 +1,101 @@
 """
 Database initialization and management.
 
-Provides SQLite connection and core table setup.
-Modules add their own tables via setup_database() method.
+Provides MongoDB connection and core collection setup.
+Modules add their own collections via setup_database() method.
 """
 
-import sqlite3
-import os
-from datetime import date, datetime
+from pymongo import MongoClient
+from datetime import datetime
+from urllib.parse import urlparse
+from core.env_loader import get_env
 
 
-def init_database(db_path='./nutrition_tracker.db'):
+def init_database(connection_url=None):
     """
-    Initialize SQLite database with core tables.
+    Initialize MongoDB database with core collections.
     
-    Modules will add their own tables via their setup_database() methods.
+    Modules will add their own collections via their setup_database() methods.
     
     Args:
-        db_path: Path to SQLite database file
+        connection_url: MongoDB connection URL (defaults to MONGODB_URL env var)
         
     Returns:
-        sqlite3.Connection: Database connection
+        pymongo.database.Database: Database object
     """
-    # Ensure directory exists
-    db_dir = os.path.dirname(db_path)
-    if db_dir and not os.path.exists(db_dir):
-        os.makedirs(db_dir)
+    if connection_url is None:
+        connection_url = get_env("MONGODB_URL")
+        if not connection_url:
+            raise ValueError("MONGODB_URL environment variable is required")
     
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    cursor = conn.cursor()
+    # Connect to MongoDB
+    client = MongoClient(connection_url)
     
-    # Core metadata table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS system_metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+    # Get database name from connection URL or use default
+    # MongoDB connection URLs typically include database name: mongodb://host:port/dbname
+    # If not specified, use default
+    try:
+        parsed = urlparse(connection_url)
+        db_name = parsed.path.lstrip('/').split('?')[0].split('/')[0]
+        if not db_name:
+            db_name = "automation_platform"
+    except:
+        db_name = "automation_platform"
     
-    # Track last processed lifelog
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS processing_state (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            last_processed_time DATETIME NOT NULL,
-            last_processed_id TEXT,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+    db = client[db_name]
+    
+    # Create indexes for core collections
+    # Collections are created automatically on first insert
+    
+    # System metadata collection
+    system_metadata = db["system_metadata"]
+    system_metadata.create_index("key", unique=True)
+    
+    # Processing state collection
+    processing_state = db["processing_state"]
+    processing_state.create_index("id", unique=True)
     
     # Initialize processing state if not exists
-    cursor.execute('SELECT COUNT(*) FROM processing_state')
-    if cursor.fetchone()[0] == 0:
-        cursor.execute('''
-            INSERT INTO processing_state (last_processed_time, last_processed_id)
-            VALUES (?, ?)
-        ''', (datetime.utcnow().isoformat(), None))
-    
-    conn.commit()
+    if processing_state.count_documents({}) == 0:
+        processing_state.insert_one({
+            "id": 1,
+            "last_processed_time": datetime.utcnow().isoformat(),
+            "last_processed_id": None,
+            "updated_at": datetime.utcnow().isoformat()
+        })
     
     print("✅ Core database initialized")
-    return conn
+    return db
 
 
-def get_last_processed_time(conn):
+def get_last_processed_time(db):
     """Get the last processed timestamp for Limitless polling"""
-    cursor = conn.cursor()
-    cursor.execute('SELECT last_processed_time FROM processing_state ORDER BY id DESC LIMIT 1')
-    row = cursor.fetchone()
-    return row[0] if row else datetime.utcnow().isoformat()
+    processing_state = db["processing_state"]
+    doc = processing_state.find_one(sort=[("id", -1)])
+    return doc["last_processed_time"] if doc else datetime.utcnow().isoformat()
 
 
-def update_last_processed_time(conn, timestamp, lifelog_id=None):
+def update_last_processed_time(db, timestamp, lifelog_id=None):
     """Update the last processed timestamp"""
-    cursor = conn.cursor()
-    cursor.execute('''
-        UPDATE processing_state 
-        SET last_processed_time = ?, last_processed_id = ?, updated_at = ?
-        WHERE id = (SELECT id FROM processing_state ORDER BY id DESC LIMIT 1)
-    ''', (timestamp, lifelog_id, datetime.utcnow().isoformat()))
-    conn.commit()
+    processing_state = db["processing_state"]
+    # Get the latest document
+    latest = processing_state.find_one(sort=[("id", -1)])
+    if latest:
+        processing_state.update_one(
+            {"id": latest["id"]},
+            {
+                "$set": {
+                    "last_processed_time": timestamp,
+                    "last_processed_id": lifelog_id,
+                    "updated_at": datetime.utcnow().isoformat()
+                }
+            }
+        )
+    else:
+        # Create new if doesn't exist
+        processing_state.insert_one({
+            "id": 1,
+            "last_processed_time": timestamp,
+            "last_processed_id": lifelog_id,
+            "updated_at": datetime.utcnow().isoformat()
+        })

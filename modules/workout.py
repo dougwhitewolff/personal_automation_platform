@@ -39,42 +39,19 @@ class WorkoutModule(BaseModule):
         ]
     
     def setup_database(self):
-        """Create exercise tracking tables"""
-        cursor = self.conn.cursor()
+        """Create exercise tracking collections and indexes"""
+        # Collections are created automatically on first insert
+        # Create indexes for performance
         
-        # Exercise logs
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS exercise_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date DATE NOT NULL,
-                timestamp DATETIME NOT NULL,
-                exercise_type TEXT NOT NULL,
-                duration_minutes INTEGER NOT NULL,
-                calories_burned INTEGER,
-                peloton_strive_score INTEGER,
-                peloton_output INTEGER,
-                peloton_avg_hr INTEGER,
-                training_zones TEXT,
-                notes TEXT,
-                lifelog_id TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+        # Exercise logs collection
+        exercise_logs = self.conn["exercise_logs"]
+        exercise_logs.create_index("date")
+        exercise_logs.create_index("lifelog_id")
         
-        # Training days calendar
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS training_days (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date DATE UNIQUE NOT NULL,
-                intensity TEXT NOT NULL,
-                exercise_calories INTEGER DEFAULT 0,
-                primary_exercise_id INTEGER,
-                notes TEXT,
-                FOREIGN KEY (primary_exercise_id) REFERENCES exercise_logs(id)
-            )
-        """)
-        
-        self.conn.commit()
+        # Training days collection
+        training_days = self.conn["training_days"]
+        training_days.create_index("date", unique=True)
+        training_days.create_index("primary_exercise_id")
     
     async def handle_log(self, message_content: str, lifelog_id: str, analysis: Dict) -> Dict:
         """Process workout logging"""
@@ -132,22 +109,25 @@ Respond with ONLY valid JSON:
     
     async def handle_query(self, query: str, context: Dict) -> str:
         """Answer workout questions"""
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            SELECT date, exercise_type, duration_minutes, calories_burned
-            FROM exercise_logs
-            WHERE date >= date('now', '-7 days')
-            ORDER BY date DESC
-        """)
+        from datetime import timedelta
+        
+        exercise_logs_collection = self.conn["exercise_logs"]
+        # Get exercises from last 7 days
+        seven_days_ago = (date.today() - timedelta(days=7)).isoformat()
+        
+        exercises_cursor = exercise_logs_collection.find(
+            {"date": {"$gte": seven_days_ago}},
+            {"date": 1, "exercise_type": 1, "duration_minutes": 1, "calories_burned": 1}
+        ).sort("date", -1)
         
         exercises = [
             {
-                "date": row[0],
-                "type": row[1],
-                "duration": row[2],
-                "calories": row[3]
+                "date": ex.get("date"),
+                "type": ex.get("exercise_type"),
+                "duration": ex.get("duration_minutes"),
+                "calories": ex.get("calories_burned")
             }
-            for row in cursor.fetchall()
+            for ex in exercises_cursor
         ]
         
         return self.openai_client.answer_query(
@@ -233,19 +213,20 @@ If any field is not visible, use null."""
     
     async def get_daily_summary(self, date_obj: date) -> Dict:
         """Get workout summary for a specific date."""
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            SELECT exercise_type, duration_minutes, calories_burned
-            FROM exercise_logs
-            WHERE date = ?
-        """, (date_obj,))
+        exercise_logs_collection = self.conn["exercise_logs"]
+        date_str = date_obj.isoformat()
         
-        exercises = cursor.fetchall()
+        exercises_cursor = exercise_logs_collection.find(
+            {"date": date_str},
+            {"exercise_type": 1, "duration_minutes": 1, "calories_burned": 1}
+        )
+        
+        exercises = list(exercises_cursor)
         if not exercises:
             return {"summary": "Rest day"}
         
-        total_minutes = sum(e[1] for e in exercises)
-        total_calories = sum(e[2] or 0 for e in exercises)
+        total_minutes = sum(e.get("duration_minutes", 0) for e in exercises)
+        total_calories = sum(e.get("calories_burned", 0) or 0 for e in exercises)
         
         summary = f"{len(exercises)} workout(s), {total_minutes} min, {total_calories} cal"
         return {
@@ -258,36 +239,34 @@ If any field is not visible, use null."""
     # ---------------------------------------------------------------------
     # Helper methods
     # ---------------------------------------------------------------------
-    def _store_exercise(self, exercise: Dict, lifelog_id: str) -> int:
+    def _store_exercise(self, exercise: Dict, lifelog_id: str) -> str:
         """Store exercise log and return record ID."""
-        cursor = self.conn.cursor()
+        exercise_logs_collection = self.conn["exercise_logs"]
         peloton = exercise.get("peloton_data", {})
+        today = date.today()
+        now = datetime.now()
         
-        cursor.execute("""
-            INSERT INTO exercise_logs
-            (date, timestamp, exercise_type, duration_minutes, calories_burned,
-             peloton_strive_score, peloton_output, peloton_avg_hr, training_zones,
-             notes, lifelog_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            date.today(),
-            datetime.now(),
-            exercise["type"],
-            exercise["duration_minutes"],
-            exercise.get("calories_burned"),
-            peloton.get("strive_score"),
-            peloton.get("output"),
-            peloton.get("avg_hr"),
-            json.dumps(peloton.get("training_zones")) if peloton.get("training_zones") else None,
-            exercise.get("notes"),
-            lifelog_id
-        ))
-        self.conn.commit()
-        return cursor.lastrowid
+        document = {
+            "date": today.isoformat(),
+            "timestamp": now.isoformat(),
+            "exercise_type": exercise["type"],
+            "duration_minutes": exercise["duration_minutes"],
+            "calories_burned": exercise.get("calories_burned"),
+            "peloton_strive_score": peloton.get("strive_score"),
+            "peloton_output": peloton.get("output"),
+            "peloton_avg_hr": peloton.get("avg_hr"),
+            "training_zones": json.dumps(peloton.get("training_zones")) if peloton.get("training_zones") else None,
+            "notes": exercise.get("notes"),
+            "lifelog_id": lifelog_id,
+            "created_at": now.isoformat()
+        }
+        
+        result = exercise_logs_collection.insert_one(document)
+        return str(result.inserted_id)
     
-    def _update_training_day(self, date_obj: date, exercise: Dict, exercise_id: int):
+    def _update_training_day(self, date_obj: date, exercise: Dict, exercise_id: str):
         """Update training day intensity based on workout duration."""
-        cursor = self.conn.cursor()
+        training_days_collection = self.conn["training_days"]
         duration = exercise.get("duration_minutes", 0)
         calories = exercise.get("calories_burned", 0)
         
@@ -300,18 +279,17 @@ If any field is not visible, use null."""
         else:
             intensity = "high"
         
-        cursor.execute("""
-            INSERT OR REPLACE INTO training_days
-            (date, intensity, exercise_calories, primary_exercise_id, notes)
-            VALUES (?, ?, ?, ?, ?)
-        """, (
-            date_obj,
-            intensity,
-            calories,
-            exercise_id,
-            f"Auto: {exercise['type']} ({duration}min)"
-        ))
-        self.conn.commit()
+        training_days_collection.replace_one(
+            {"date": date_obj.isoformat()},
+            {
+                "date": date_obj.isoformat(),
+                "intensity": intensity,
+                "exercise_calories": calories,
+                "primary_exercise_id": exercise_id,
+                "notes": f"Auto: {exercise['type']} ({duration}min)"
+            },
+            upsert=True
+        )
     
     def _create_exercise_embed(self, exercise: Dict, needs_electrolytes: bool):
         """Generate embed confirmation for standard workout logs."""

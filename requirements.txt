@@ -1,8 +1,10 @@
-discord.py==2.3.2
-openai==1.10.0
+discord.py>=2.6.4
+audioop-lts>=0.2.2
+openai>=1.55.3
 requests==2.31.0
 schedule==1.2.0
 pytz==2023.3
 pillow==11.0.0
 pyyaml==6.0.1
 python-dotenv==1.0.1
+pymongo>=4.6.0
