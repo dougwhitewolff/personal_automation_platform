@@ -24,10 +24,11 @@ class WorkoutModule(BaseModule):
     
     def get_keywords(self) -> List[str]:
         return [
+            "log workout", "finished workout", "completed workout",
             "workout", "exercise", "trained", "worked out",
             "peloton", "ride", "run", "ran",
-            "cycling", "biking", "strength",
-            "log workout", "finished workout"
+            "cycling", "biking", "strength training",
+            "gym", "training session"
         ]
     
     def get_question_patterns(self) -> List[str]:
@@ -122,9 +123,10 @@ Respond with ONLY valid JSON:
             prompt_template=prompt
         )
         
-        # Handle invalid or missing detection
+        # Handle invalid or missing detection - return None silently instead of error embed
         if "error" in analysis or not analysis.get("exercise", {}).get("detected"):
-            return {"embed": self._create_error_embed("No exercise detected")}
+            print(f"⚠️  Workout module: No exercise detected in entry, skipping silently")
+            return None  # Don't show error to user - this entry just isn't about exercise
         
         # Store exercise data
         exercise = analysis["exercise"]
