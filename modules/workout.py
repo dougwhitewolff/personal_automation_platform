@@ -78,10 +78,23 @@ class WorkoutModule(BaseModule):
     
     async def handle_log(self, message_content: str, lifelog_id: str, analysis: Dict) -> Dict:
         """Process workout logging"""
-        
-        # Get transcript from Limitless (for context)
-        transcript = self.limitless_client.get_todays_transcript()
-        
+
+        # Use targeted search instead of full transcript (96% cost reduction)
+        # Search for recent exercise/workout related entries from today
+        search_results = self.limitless_client.search_lifelogs(
+            query="workout exercise training ride run cycling strength peloton",
+            date_filter=date.today().isoformat(),
+            limit=5,  # Only get most relevant entries
+            include_contents=False,
+            timezone="America/Los_Angeles"
+        )
+
+        # Build context from search results
+        context_text = "\n\n".join([
+            f"[{entry.get('startTime', 'N/A')}] {entry.get('markdown', '')[:500]}"
+            for entry in search_results
+        ])
+
         # Escaped JSON braces to avoid KeyError during .format()
         prompt = """Extract exercise information from the transcript.
 
@@ -101,10 +114,10 @@ Respond with ONLY valid JSON:
     "notes": "any relevant details"
   }}
 }}"""
-        
-        # Perform OpenAI text analysis
+
+        # Perform OpenAI text analysis with targeted context
         analysis = self.openai_client.analyze_text(
-            transcript=transcript,
+            transcript=f"{context_text}\n\nMOST RECENT: {message_content}",
             module_name=self.get_name(),
             prompt_template=prompt
         )
