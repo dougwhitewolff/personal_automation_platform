@@ -13,8 +13,9 @@ Coordinates all services:
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, date
 import yaml
+import re
 
 # Import core services (lazy Discord import handled in core/__init__.py)
 from core import (
@@ -22,6 +23,7 @@ from core import (
     LimitlessClient,
     OpenAIClient,
     Scheduler,
+    AutomationOrchestrator,
     get_setup_bot,   # Lazy import function for Discord bot
 )
 from core.database import get_last_processed_time, update_last_processed_time
@@ -70,14 +72,36 @@ def await_sync(coro):
     return loop.run_until_complete(coro)
 
 
-def polling_loop(limitless_client, registry, conn):
+def is_log_that_command(text: str) -> bool:
+    """
+    Detect canonical "Log that" trigger phrase in text.
+    
+    Checks for variants like "log that", "track that", "log this", etc.
+    Case-insensitive matching.
+    
+    Args:
+        text: Text to check for trigger phrase
+        
+    Returns:
+        True if "log that" variant is detected
+    """
+    if not text:
+        return False
+    
+    # Pattern matches: log/track + that/this/it
+    pattern = r'\b(log|track)\s+(that|this|it)\b'
+    return bool(re.search(pattern, text, re.IGNORECASE))
+
+
+def polling_loop(limitless_client, registry, conn, orchestrator):
     """
     Poll Limitless API for new lifelogs and dispatch them to modules.
 
     Each iteration:
     - Retrieves new entries
-    - Detects keywords
-    - Routes logs to matching modules
+    - Detects "Log that" trigger phrase
+    - Routes to orchestrator for semantic routing
+    - Processes selected modules
     - Updates last processed time
     """
     poll_interval = int(get_env("POLL_INTERVAL", "2"))
@@ -101,37 +125,163 @@ def polling_loop(limitless_client, registry, conn):
                 conn, newest_entry["endTime"], newest_entry["id"]
             )
 
-            for entry in entries:
-                for module in registry.get_all_modules():
-                    if module.matches_keyword(entry.get("markdown", "")):
-                        try:
-                            print(
-                                f"🧩 DETECTED: {module.get_name()} matched for entry {entry['id']}"
-                            )
-
+            # Process entries with index tracking for context building
+            for idx, entry in enumerate(entries):
+                markdown = entry.get("markdown", "")
+                
+                # Step 1: Check for "Log that" first to build context before routing
+                if is_log_that_command(markdown):
+                    print(f"🔍 'Log that' detected in entry {entry['id']}")
+                    
+                    # Build context transcript BEFORE routing (so orchestrator has full context)
+                    # Entries are in reverse chronological order (newest first), so we need to reverse
+                    # to get chronological order (oldest to newest) for context
+                    start_idx = max(0, idx - 4)  # Get up to 5 entries (current + 4 preceding)
+                    context_entries = entries[start_idx:idx + 1]
+                    # Reverse to get chronological order (oldest to newest)
+                    context_entries = list(reversed(context_entries))
+                    # Build context transcript by joining markdown entries
+                    context_transcript = "\n\n".join([
+                        e.get("markdown", "") for e in context_entries if e.get("markdown")
+                    ])
+                    
+                    # Step 2: Route via orchestrator WITH context transcript (for better routing decisions)
+                    routing_decision = orchestrator.route_intent(
+                        transcript=context_transcript,  # Pass full context, not just single entry
+                        source="limitless",
+                        context={"lifelog_id": entry["id"]}
+                    )
+                else:
+                    # For non-"Log that" entries, check for summary requests (single entry is fine)
+                    routing_decision = orchestrator.route_intent(
+                        transcript=markdown,
+                        source="limitless",
+                        context={"lifelog_id": entry["id"]}
+                    )
+                    
+                    # Handle summary requests (don't require "Log that")
+                    if routing_decision.get("summary_request"):
+                        target_date = routing_decision.get("summary_date", date.today())
+                        print(f"📊 Summary request detected for {target_date.isoformat()} in entry {entry['id']}")
+                        
+                        # Get summary and send to Discord
+                        from core.discord_bot import get_summary_for_date
+                        summary_embed = await_sync(get_summary_for_date(registry, target_date, channel=None))
+                        
+                        if summary_embed:
+                            from core.discord_bot import send_webhook_notification
+                            webhook_url = get_env("DISCORD_WEBHOOK_URL")
+                            if webhook_url:
+                                send_webhook_notification(
+                                    webhook_url,
+                                    {"embeds": [summary_embed.to_dict()]},
+                                )
+                        continue
+                    
+                    # Skip entries without "Log that" (unless it was a summary request)
+                    continue
+                
+                # Step 4: Handle routing decision
+                if routing_decision.get("error"):
+                    print(f"⚠️  Orchestrator error: {routing_decision['error']}")
+                    # Send error notification to Discord
+                    from core.discord_bot import send_webhook_notification
+                    webhook_url = get_env("DISCORD_WEBHOOK_URL")
+                    if webhook_url:
+                        import discord
+                        error_embed = discord.Embed(
+                            title="❌ Routing Error",
+                            description=f"Failed to route entry: {routing_decision['error']}",
+                            color=0xFF0000
+                        )
+                        send_webhook_notification(
+                            webhook_url,
+                            {"embeds": [error_embed.to_dict()]},
+                        )
+                    continue
+                
+                if routing_decision.get("out_of_scope") or not routing_decision.get("modules"):
+                    print(f"ℹ️  Entry {entry['id']} is out of scope or no modules matched")
+                    # Send notification that nothing was logged
+                    from core.discord_bot import send_webhook_notification
+                    webhook_url = get_env("DISCORD_WEBHOOK_URL")
+                    if webhook_url:
+                        import discord
+                        info_embed = discord.Embed(
+                            title="ℹ️ No Action Taken",
+                            description=f"Entry detected but no matching modules found.\n\nReasoning: {routing_decision.get('reasoning', 'Unknown')}",
+                            color=0xFFFF00
+                        )
+                        send_webhook_notification(
+                            webhook_url,
+                            {"embeds": [info_embed.to_dict()]},
+                        )
+                    continue
+                
+                # Step 5: Process each selected module
+                for module_decision in routing_decision["modules"]:
+                    module_name = module_decision["name"]
+                    action = module_decision["action"]
+                    confidence = module_decision.get("confidence", 0.8)
+                    
+                    # Find module in registry
+                    module = None
+                    for mod in registry.get_all_modules():
+                        if mod.get_name() == module_name:
+                            module = mod
+                            break
+                    
+                    if not module:
+                        print(f"⚠️  Module '{module_name}' not found in registry")
+                        continue
+                    
+                    # Only process if confidence is high enough
+                    if confidence < 0.7:
+                        print(f"⚠️  Skipping {module_name} due to low confidence ({confidence:.2f})")
+                        continue
+                    
+                    try:
+                        print(
+                            f"🧩 ROUTING: {module_name} ({action}, confidence: {confidence:.2f}) "
+                            f"for entry {entry['id']}"
+                        )
+                        
+                        # Execute appropriate action
+                        # Pass context_transcript instead of just markdown
+                        if action == "log":
                             result = await_sync(
                                 module.handle_log(
-                                    entry["markdown"], entry["id"], {}
+                                    context_transcript, entry["id"], {}
                                 )
                             )
-
-                            if result and result.get("embed"):
-                                from core.discord_bot import send_webhook_notification
-
-                                webhook_url = get_env("DISCORD_WEBHOOK_URL")
-                                if webhook_url:
-                                    send_webhook_notification(
-                                        webhook_url,
-                                        {"embeds": [result["embed"].to_dict()]},
-                                    )
-
-                        except Exception as e:
-                            print(
-                                f"❌ ERROR processing {module.get_name()} for entry {entry['id']}: {e}"
+                        elif action == "query":
+                            # For queries, we'd typically need a question, but in "log that" context
+                            # it's usually a log action. Handle as log for now.
+                            result = await_sync(
+                                module.handle_log(
+                                    context_transcript, entry["id"], {}
+                                )
                             )
-                            import traceback
-
-                            traceback.print_exc()
+                        else:
+                            print(f"⚠️  Unknown action: {action}")
+                            continue
+                        
+                        # Send Discord notification
+                        if result and result.get("embed"):
+                            from core.discord_bot import send_webhook_notification
+                            webhook_url = get_env("DISCORD_WEBHOOK_URL")
+                            if webhook_url:
+                                send_webhook_notification(
+                                    webhook_url,
+                                    {"embeds": [result["embed"].to_dict()]},
+                                )
+                    
+                    except Exception as e:
+                        print(
+                            f"❌ ERROR processing {module_name} for entry {entry['id']}: {e}"
+                        )
+                        import traceback
+                        traceback.print_exc()
 
             time.sleep(poll_interval)
 
@@ -173,17 +323,21 @@ def main():
         print(f"   • {module.get_name()}: {keywords}...")
     print()
 
-    # 6. Start scheduler
+    # 6. Initialize automation orchestrator
+    orchestrator = AutomationOrchestrator(openai_client, registry)
+    print("✅ Automation Orchestrator initialized")
+
+    # 7. Start scheduler
     scheduler = Scheduler(get_env("TIMEZONE", "America/Los_Angeles"))
     scheduler.load_from_registry(registry)
     threading.Thread(target=scheduler.run, daemon=True).start()
 
-    # 7. Start Limitless polling
+    # 8. Start Limitless polling
     threading.Thread(
-        target=polling_loop, args=(limitless_client, registry, conn), daemon=True
+        target=polling_loop, args=(limitless_client, registry, conn, orchestrator), daemon=True
     ).start()
 
-    # 8. Setup and run Discord bot (lazy import)
+    # 9. Setup and run Discord bot (lazy import)
     print("✅ Platform initialized — starting Discord bot...\n")
     print("=" * 60)
     print("  Platform is live!")
@@ -197,6 +351,7 @@ def main():
         channel_id=int(get_env("DISCORD_CHANNEL_ID")),
         registry=registry,
         conn=conn,
+        orchestrator=orchestrator,
     )
 
     try:

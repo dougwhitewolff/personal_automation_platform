@@ -10,11 +10,74 @@ Handles:
 
 import discord
 from discord.ext import commands
-from typing import Dict, Callable
+from typing import Dict, Callable, Optional
 import asyncio
+from datetime import date, datetime, timedelta
 
 
-def setup_bot(token: str, channel_id: int, registry, conn):
+async def get_summary_for_date(registry, target_date: date, channel=None):
+    """
+    Helper function to get and format summary for a specific date.
+    Can be called from commands or orchestrator.
+    
+    Args:
+        registry: ModuleRegistry instance
+        target_date: Date to get summary for
+        channel: Optional Discord channel to send embed to (if None, returns embed dict)
+        
+    Returns:
+        Discord embed if channel is None, otherwise None (sends to channel)
+    """
+    summary_data = await registry.get_daily_summary_all(target_date)
+    
+    embed = discord.Embed(
+        title="📅 Daily Summary",
+        description=f"Summary for {target_date.strftime('%B %d, %Y')}",
+        color=0x00ff00
+    )
+    
+    for module_name, data in summary_data.items():
+        if data and not data.get('error'):
+            # Build detailed summary text
+            summary_text = data.get('summary', 'No data')
+            
+            # Add sleep and bowel movements for nutrition module
+            if module_name == 'nutrition':
+                sleep = data.get('sleep', {})
+                health = data.get('health', {})
+                
+                details = []
+                if sleep.get('hours') is not None:
+                    sleep_info = f"💤 Sleep: {sleep['hours']:.1f}h"
+                    if sleep.get('score'):
+                        sleep_info += f" (score: {sleep['score']})"
+                    if sleep.get('quality'):
+                        sleep_info += f" - {sleep['quality']}"
+                    details.append(sleep_info)
+                
+                if health.get('bowel_movements', 0) > 0:
+                    details.append(f"🚽 Bowel movements: {health['bowel_movements']}")
+                
+                if health.get('weight_lbs'):
+                    details.append(f"⚖️ Weight: {health['weight_lbs']} lbs")
+                
+                if details:
+                    summary_text += "\n" + "\n".join(details)
+            
+            embed.add_field(
+                name=f"📊 {module_name.title()}",
+                value=summary_text,
+                inline=False
+            )
+    
+    if channel:
+        await channel.send(embed=embed)
+        return None
+    else:
+        return embed
+
+
+def setup_bot(token: str, channel_id: int, registry, conn, orchestrator=None):
     """
     Setup and configure Discord bot.
     
@@ -23,6 +86,7 @@ def setup_bot(token: str, channel_id: int, registry, conn):
         channel_id: Channel ID to monitor
         registry: Module registry for routing
         conn: Database connection
+        orchestrator: AutomationOrchestrator instance for semantic routing
         
     Returns:
         Configured bot instance
@@ -43,7 +107,7 @@ def setup_bot(token: str, channel_id: int, registry, conn):
     @bot.event
     async def on_message(message):
         print(f"📨 on_message triggered: {message.content!r}")
-        """Route messages to appropriate modules"""
+        """Route messages to appropriate modules using orchestrator"""
         # Ignore own messages
         if message.author == bot.user:
             return
@@ -54,56 +118,186 @@ def setup_bot(token: str, channel_id: int, registry, conn):
         
         # Handle images
         if message.attachments:
-            await handle_attachments(message, registry, pending_confirmations)
+            await handle_attachments(message, registry, pending_confirmations, orchestrator)
             return
         
-        content = message.content.lower()
+        content = message.content.strip()
         
-        # Route to modules based on keywords
+        if not content:
+            return
+        
+        # Skip orchestrator for Discord commands (messages starting with "!")
+        # Commands are handled by bot.process_commands() at the end
+        if content.startswith('!'):
+            await bot.process_commands(message)
+            return
+        
+        # Use orchestrator for semantic routing if available
+        if orchestrator:
+            try:
+                # Route via orchestrator
+                routing_decision = orchestrator.route_intent(
+                    transcript=content,
+                    source="discord",
+                    context={"message_id": str(message.id)}
+                )
+                
+                # Handle routing decision
+                if routing_decision.get("error"):
+                    await message.channel.send(
+                        f"❌ Error routing message: {routing_decision['error']}"
+                    )
+                    return
+                
+                # Check for summary request
+                if routing_decision.get("summary_request"):
+                    target_date = routing_decision.get("summary_date", date.today())
+                    await get_summary_for_date(registry, target_date, message.channel)
+                    return
+                
+                # Check for direct answer (in-scope but no module routing)
+                if routing_decision.get("direct_answer"):
+                    await message.channel.send(routing_decision["direct_answer"])
+                    return
+                
+                if routing_decision.get("out_of_scope"):
+                    # Out of scope - send polite refusal
+                    await message.channel.send(
+                        "I'm sorry, but I can only help with personal automation tasks like "
+                        "nutrition tracking, workout logging, and related questions. "
+                        "I can't answer general questions outside my scope."
+                    )
+                    return
+                
+                modules_to_process = routing_decision.get("modules", [])
+                
+                if not modules_to_process:
+                    await message.channel.send(
+                        "I couldn't determine which module should handle your message. "
+                        "Please try rephrasing or be more specific."
+                    )
+                    return
+                
+                # Process each selected module
+                for module_decision in modules_to_process:
+                    module_name = module_decision["name"]
+                    action = module_decision["action"]
+                    confidence = module_decision.get("confidence", 0.8)
+                    
+                    # Find module in registry
+                    module = None
+                    for mod in registry.modules:
+                        if mod.get_name() == module_name:
+                            module = mod
+                            break
+                    
+                    if not module:
+                        continue
+                    
+                    # Only process if confidence is high enough
+                    if confidence < 0.7:
+                        continue
+                    
+                    try:
+                        if action == "query":
+                            # Handle as question
+                            print(f"🧠 Routing query to {module_name} (confidence: {confidence:.2f})")
+                            answer = await module.handle_query(content, {})
+                            await message.channel.send(answer)
+                        
+                        elif action == "log":
+                            # Handle as log command
+                            print(f"📝 Routing log to {module_name} (confidence: {confidence:.2f})")
+                            result = await module.handle_log(
+                                content,
+                                f"discord_{message.id}",
+                                {}
+                            )
+                            
+                            if result and result.get("embed"):
+                                await message.channel.send(embed=result["embed"])
+                            elif result and result.get("message"):
+                                await message.channel.send(result["message"])
+                        
+                    except Exception as e:
+                        print(f"❌ Error processing {module_name}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        await message.channel.send(
+                            f"❌ Error processing with {module_name} module: {str(e)}"
+                        )
+                
+                return  # Don't process commands if orchestrator handled it
+                
+            except Exception as e:
+                print(f"❌ Orchestrator error: {e}")
+                import traceback
+                traceback.print_exc()
+                # Fall through to keyword matching fallback
+        
+        # Fallback to keyword matching if orchestrator unavailable or failed
+        content_lower = content.lower()
+        
         # Check for questions
         for module in registry.modules:
-            if module.matches_question(content):
-                print(f"✅ Question match for module: {module.get_name()}")
+            if module.matches_question(content_lower):
+                print(f"✅ Question match for module: {module.get_name()} (fallback)")
 
                 try:
-                    # Diagnostic print — confirm the query is being sent
-                    print(f"🧠 Sending query to {module.get_name()}.handle_query() with message: {message.content}")
-
-                    # Call into the module
-                    answer = await module.handle_query(message.content, {})
-
-                    # Diagnostic print — confirm a response was received
-                    print(f"🧠 Response received from {module.get_name()}: {answer!r}")
-
-                    # Send the result to Discord
+                    answer = await module.handle_query(content, {})
                     await message.channel.send(answer)
-
                 except Exception as e:
                     print(f"❌ Error answering query: {e}")
                     await message.channel.send(f"❌ Error: {str(e)}")
 
-                # Stop checking other modules
                 return
                 
         # Process commands
         await bot.process_commands(message)
     
-    async def handle_attachments(message, registry, pending_confirmations):
+    async def handle_attachments(message, registry, pending_confirmations, orchestrator=None):
         """Handle image attachments"""
         for attachment in message.attachments:
             if not attachment.content_type or not attachment.content_type.startswith('image/'):
                 continue
             
             image_bytes = await attachment.read()
-            content = message.content.lower()
-            print(f"🧾 Normalized content for matching: {repr(content)}")
+            content = message.content or ""
+            print(f"🧾 Processing image with content: {repr(content)}")
             
-            # Determine which module should process
+            # Determine which module should process using orchestrator if available
             matched_module = None
-            for module in registry.modules:
-                if module.matches_keyword(content):
-                    matched_module = module
-                    break
+            
+            if orchestrator and content.strip():
+                try:
+                    routing_decision = orchestrator.route_intent(
+                        transcript=content,
+                        source="discord",
+                        context={"has_image": True}
+                    )
+                    
+                    if not routing_decision.get("out_of_scope") and routing_decision.get("modules"):
+                        # Get highest confidence module
+                        best_module_decision = max(
+                            routing_decision["modules"],
+                            key=lambda m: m.get("confidence", 0)
+                        )
+                        
+                        module_name = best_module_decision["name"]
+                        for module in registry.modules:
+                            if module.get_name() == module_name:
+                                matched_module = module
+                                break
+                except Exception as e:
+                    print(f"⚠️  Orchestrator error for image: {e}")
+            
+            # Fallback to keyword matching
+            if not matched_module:
+                content_lower = content.lower()
+                for module in registry.modules:
+                    if module.matches_keyword(content_lower):
+                        matched_module = module
+                        break
             
             if not matched_module:
                 # Ask user
@@ -178,27 +372,41 @@ def setup_bot(token: str, channel_id: int, registry, conn):
     
     # Commands
     @bot.command(name='summary')
-    async def daily_summary(ctx):
-        """Get today's summary from all modules"""
-        from datetime import date
+    async def daily_summary(ctx, date_str: str = None):
+        """Get summary from all modules for a specific date or today
         
-        summary_data = await registry.get_daily_summary_all(date.today())
+        Usage:
+        !summary - Today's summary
+        !summary 2024-01-15 - Specific date
+        !summary yesterday - Yesterday's summary
+        !summary today - Today's summary
+        """
+        from datetime import date, datetime, timedelta
         
-        embed = discord.Embed(
-            title="📅 Daily Summary",
-            description=f"Summary for {date.today().strftime('%B %d, %Y')}",
-            color=0x00ff00
-        )
+        # Parse date if provided
+        if date_str:
+            date_str_lower = date_str.lower().strip()
+            try:
+                if date_str_lower == "yesterday":
+                    target_date = date.today() - timedelta(days=1)
+                elif date_str_lower == "today":
+                    target_date = date.today()
+                else:
+                    # Try parsing various date formats
+                    try:
+                        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    except ValueError:
+                        try:
+                            target_date = datetime.strptime(date_str, "%Y/%m/%d").date()
+                        except ValueError:
+                            target_date = datetime.strptime(date_str, "%m/%d/%Y").date()
+            except (ValueError, AttributeError):
+                await ctx.send("❌ Invalid date format. Use YYYY-MM-DD, 'today', or 'yesterday'")
+                return
+        else:
+            target_date = date.today()
         
-        for module_name, data in summary_data.items():
-            if data:
-                embed.add_field(
-                    name=f"📊 {module_name.title()}",
-                    value=data.get('summary', 'No data'),
-                    inline=False
-                )
-        
-        await ctx.send(embed=embed)
+        await get_summary_for_date(registry, target_date, ctx.channel)
     
     @bot.command(name='help')
     async def help_command(ctx):
@@ -212,8 +420,16 @@ def setup_bot(token: str, channel_id: int, registry, conn):
         # Commands
         embed.add_field(
             name="Commands",
-            value="`!summary` - Daily summary from all modules\n"
-                  "`!help` - This message",
+            value=(
+                "`!summary` - Today's summary from all modules\n"
+                "`!summary 2024-01-15` - Summary for specific date\n"
+                "`!summary yesterday` - Yesterday's summary\n"
+                "`!help` - This message\n\n"
+                "You can also ask for summaries naturally:\n"
+                "- \"show me today's summary\"\n"
+                "- \"what did I do yesterday?\"\n"
+                "- \"summary for January 15th\""
+            ),
             inline=False
         )
         

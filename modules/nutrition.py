@@ -183,9 +183,8 @@ class NutritionModule(BaseModule):
                         analysis: Dict) -> Dict:
         """Process food/health logging"""
         
-        # Get today's transcript for context
-        # ensure API uses correct boolean + timezone parameters
-        transcript = self.limitless_client.get_todays_transcript(timezone="America/Los_Angeles")
+        # message_content now contains the context transcript (last 5 entries from polling batch)
+        # No need to fetch full day's transcript
         
         # Get custom foods for context
         custom_foods_context = self._get_custom_foods_context()
@@ -194,7 +193,7 @@ class NutritionModule(BaseModule):
         prompt = self._build_analysis_prompt(custom_foods_context)
         
         analysis = self.openai_client.analyze_text(
-            transcript=f"{transcript}\n\nMOST RECENT: {message_content}",
+            transcript=message_content,
             module_name=self.get_name(),
             prompt_template=prompt
         )
@@ -226,13 +225,11 @@ class NutritionModule(BaseModule):
         # Diagnostic print – confirm that this function is being called
         print(f"🧩 Nutrition.handle_query() triggered with query: {query!r}")
 
-        # Get relevant data
+        # Get relevant data from MongoDB (no need for raw transcripts)
         today_summary = self._get_daily_summary_internal(date.today())
-        transcript = self.limitless_client.get_todays_transcript()
 
         context_data = {
-            'today_summary': today_summary,
-            'recent_transcript': transcript[:2000]  # Limit size
+            'today_summary': today_summary
         }
 
         # Make the OpenAI call
@@ -363,6 +360,13 @@ Respond with ONLY valid JSON:
 
         {custom_context}
 
+        IMPORTANT INSTRUCTIONS:
+        - If a food is in the CUSTOM FOODS DATABASE above, use those exact values and set is_custom_food=true
+        - If a food is NOT in the custom foods database, you MUST estimate nutrition values using standard nutrition knowledge
+        - NEVER leave calories, protein, carbs, fat, or fiber as 0 unless the food truly has none
+        - For common foods (banana, apple, chicken, etc.), use standard serving size estimates
+        - Always provide realistic nutrition estimates for any food item
+
         TRANSCRIPT:
         {{transcript}}
 
@@ -372,11 +376,11 @@ Respond with ONLY valid JSON:
             {{{{
             "item": "food name",
             "time": "HH:MM",
-            "calories": 0,
-            "protein_g": 0,
-            "carbs_g": 0,
-            "fat_g": 0,
-            "fiber_g": 0,
+            "calories": <estimate if not custom, use custom value if custom>,
+            "protein_g": <estimate if not custom, use custom value if custom>,
+            "carbs_g": <estimate if not custom, use custom value if custom>,
+            "fat_g": <estimate if not custom, use custom value if custom>,
+            "fiber_g": <estimate if not custom, use custom value if custom>,
             "is_custom_food": true/false,
             "custom_food_name": "smoothie_small" or null
             }}}}
@@ -522,6 +526,19 @@ Respond with ONLY valid JSON:
         cursor.execute('SELECT COALESCE(SUM(amount_oz), 0) FROM hydration_logs WHERE date = ?', (date_obj,))
         water = cursor.fetchone()[0]
         
+        # Sleep data
+        sleep_logs_collection = self.conn["sleep_logs"]
+        sleep_data = sleep_logs_collection.find_one({"date": date_str})
+        sleep_hours = sleep_data.get("hours") if sleep_data else None
+        sleep_score = sleep_data.get("sleep_score") if sleep_data else None
+        sleep_quality = sleep_data.get("quality_notes") if sleep_data else None
+        
+        # Health markers (bowel movements, weight)
+        daily_health_collection = self.conn["daily_health"]
+        health_data = daily_health_collection.find_one({"date": date_str})
+        bowel_movements = health_data.get("bowel_movements", 0) if health_data else 0
+        weight_lbs = health_data.get("weight_lbs") if health_data else None
+        
         # Get targets (need to calculate based on training day)
         targets = self._calculate_targets(date_obj)
         
@@ -535,6 +552,13 @@ Respond with ONLY valid JSON:
             'hydration_oz': targets['hydration_oz'] - water
         }
         
+        # Build summary text
+        summary_parts = [f"{totals[0]:.0f} cal, {totals[1]:.0f}g protein, {totals[2]:.0f}g carbs"]
+        if sleep_hours is not None:
+            summary_parts.append(f"{sleep_hours:.1f}h sleep")
+        if bowel_movements > 0:
+            summary_parts.append(f"{bowel_movements} BM")
+        
         return {
             'totals': {
                 'calories': totals[0],
@@ -546,7 +570,16 @@ Respond with ONLY valid JSON:
             },
             'targets': targets,
             'remaining': remaining,
-            'summary': f"{totals[0]:.0f} cal, {totals[1]:.0f}g protein, {totals[2]:.0f}g carbs"
+            'sleep': {
+                'hours': sleep_hours,
+                'score': sleep_score,
+                'quality': sleep_quality
+            },
+            'health': {
+                'bowel_movements': bowel_movements,
+                'weight_lbs': weight_lbs
+            },
+            'summary': ", ".join(summary_parts)
         }
     
     def _calculate_targets(self, date_obj: date) -> Dict:
