@@ -1,0 +1,59 @@
+Folder structure for: C:\Development\personal-automation-platform
+
+.env
+.gitignore
+CONTRIBUTING.md
+DEPLOYMENT.md
+FILE_MANIFEST.md
+INDEX.md
+PROJECT_SUMMARY.md
+QUICKSTART.md
+README.md
+check_env_key.py
+config.yaml
+core/
+    ├── __init__.py
+    ├── __pycache__/
+        ├── __init__.cpython-313.pyc
+        ├── database.cpython-313.pyc
+        ├── discord_bot.cpython-313.pyc
+        ├── env_loader.cpython-313.pyc
+        ├── limitless_client.cpython-313.pyc
+        ├── openai_client.cpython-313.pyc
+        ├── scheduler.cpython-313.pyc
+    ├── database.py
+    ├── discord_bot.py
+    ├── env_loader.py
+    ├── limitless_client.py
+    ├── openai_client.py
+    ├── scheduler.py
+deployment/
+    ├── railway.json
+    ├── setup.sh
+    ├── systemd.service
+fix_discord_imports.py
+main.py
+modules/
+    ├── __init__.py
+    ├── __pycache__/
+        ├── __init__.cpython-313.pyc
+        ├── base.cpython-313.pyc
+        ├── nutrition.cpython-313.pyc
+        ├── registry.cpython-313.pyc
+        ├── workout.cpython-313.pyc
+    ├── base.py
+    ├── nutrition.py
+    ├── registry.py
+    ├── workout.py
+nutrition_tracker.db
+requirements.txt
+reset_database_time.py
+show_structure.py
+test_actual_transcript.py
+test_limitless_api.py
+test_openai_auth.py
+trace_openai_call.py
+utils/
+    ├── __init__.py
+    ├── helpers.py
+verify.sh

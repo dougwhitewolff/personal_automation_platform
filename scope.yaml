@@ -1,0 +1,68 @@
+# Scope Configuration for Automation Orchestrator
+# Defines what topics are considered "in-scope" for the personal automation platform
+
+# In-scope topics that the agent can answer directly (even without module routing)
+in_scope_topics:
+  # Personal automation and productivity
+  - "personal automation"
+  - "productivity"
+  - "life tracking"
+  - "habit tracking"
+  - "self-improvement"
+  
+  # Health and wellness (general questions)
+  - "health"
+  - "wellness"
+  - "fitness"
+  - "nutrition advice"
+  - "exercise advice"
+  - "sleep"
+  - "recovery"
+  
+  # Platform capabilities
+  - "what can you do"
+  - "what modules are available"
+  - "how does this work"
+  - "platform features"
+  - "automation capabilities"
+  
+  # General questions about user's data
+  - "my data"
+  - "my logs"
+  - "my progress"
+  - "my stats"
+  - "my summary"
+
+# Out-of-scope topics (explicitly excluded)
+out_of_scope_topics:
+  - "weather"
+  - "news"
+  - "current events"
+  - "politics"
+  - "sports scores"
+  - "stock market"
+  - "general knowledge trivia"
+  - "jokes"
+  - "entertainment"
+  - "cooking recipes"  # Unless it's about logging food
+  - "travel planning"
+  - "shopping recommendations"
+
+# Scope checking behavior
+scope_config:
+  # If true, check scope before marking as out-of-scope
+  enable_scope_check: true
+  
+  # If true, allow direct answers for in-scope queries even without module routing
+  allow_direct_answers: true
+  
+  # Model to use for direct answers (when no module routing)
+  direct_answer_model: "gpt-5-nano"
+  
+  # System prompt for direct answers
+  direct_answer_system_prompt: |
+    You are a helpful personal automation assistant. You help users with their personal
+    tracking, health, fitness, nutrition, and productivity goals. Answer questions
+    concisely and helpfully, but stay within your scope of personal automation.
+    If asked about something outside your scope, politely redirect to your capabilities.
+
