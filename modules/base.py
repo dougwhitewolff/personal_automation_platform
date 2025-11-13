@@ -21,25 +21,25 @@ class BaseModule(ABC):
     - Image processing
     - Scheduled tasks
     
-    Each module maintains its own database tables and logic.
+    Each module maintains its own database collections and logic.
     """
     
-    def __init__(self, conn, openai_client, limitless_client, config=None):
+    def __init__(self, db, openai_client, limitless_client, config=None):
         """
         Initialize module.
         
         Args:
-            conn: SQLite database connection
+            db: MongoDB database instance
             openai_client: OpenAI client instance
             limitless_client: Limitless API client instance
             config: Module-specific configuration from config.yaml
         """
-        self.conn = conn
+        self.db = db
         self.openai_client = openai_client
         self.limitless_client = limitless_client
         self.config = config or {}
         
-        # Setup database tables
+        # Setup database collections
         self.setup_database()
     
     @abstractmethod

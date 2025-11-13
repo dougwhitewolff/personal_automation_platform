@@ -93,7 +93,7 @@ def is_log_that_command(text: str) -> bool:
     return bool(re.search(pattern, text, re.IGNORECASE))
 
 
-def polling_loop(limitless_client, registry, conn, orchestrator):
+def polling_loop(limitless_client, registry, db, orchestrator):
     """
     Poll Limitless API for new lifelogs and dispatch them to modules.
 
@@ -111,7 +111,7 @@ def polling_loop(limitless_client, registry, conn, orchestrator):
 
     while True:
         try:
-            last_time = get_last_processed_time(conn)
+            last_time = get_last_processed_time(db)
             entries = limitless_client.poll_recent_entries(
                 start_time=last_time, limit=10, timezone=timezone
             )
@@ -122,7 +122,7 @@ def polling_loop(limitless_client, registry, conn, orchestrator):
 
             newest_entry = entries[0]
             update_last_processed_time(
-                conn, newest_entry["endTime"], newest_entry["id"]
+                db, newest_entry["endTime"], newest_entry["id"]
             )
 
             # Process entries with index tracking for context building
@@ -307,15 +307,15 @@ def main():
     config = load_config()
 
     # 3. Initialize database
-    db_path = get_env("DATABASE_PATH", "./nutrition_tracker.db")
-    conn = init_database(db_path)
+    mongodb_url = get_env("MONGODB_URL", "mongodb://localhost:27017/automation_platform")
+    db = init_database(mongodb_url)
 
     # 4. Initialize clients
     limitless_client = LimitlessClient(get_env("LIMITLESS_API_KEY"))
     openai_client = OpenAIClient(get_env("OPENAI_API_KEY"))
 
     # 5. Initialize module registry
-    registry = ModuleRegistry(conn, openai_client, limitless_client, config)
+    registry = ModuleRegistry(db, openai_client, limitless_client, config)
 
     print("\nActive Modules:")
     for module in registry.get_all_modules():
@@ -334,7 +334,7 @@ def main():
 
     # 8. Start Limitless polling
     threading.Thread(
-        target=polling_loop, args=(limitless_client, registry, conn, orchestrator), daemon=True
+        target=polling_loop, args=(limitless_client, registry, db, orchestrator), daemon=True
     ).start()
 
     # 9. Setup and run Discord bot (lazy import)
@@ -350,7 +350,7 @@ def main():
         token=get_env("DISCORD_BOT_TOKEN"),
         channel_id=int(get_env("DISCORD_CHANNEL_ID")),
         registry=registry,
-        conn=conn,
+        db=db,
         orchestrator=orchestrator,
     )
 

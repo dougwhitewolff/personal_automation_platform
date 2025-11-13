@@ -15,17 +15,17 @@ from datetime import date
 class ModuleRegistry:
     """Central registry for all automation modules"""
     
-    def __init__(self, conn, openai_client, limitless_client, config: Dict):
+    def __init__(self, db, openai_client, limitless_client, config: Dict):
         """
         Initialize registry and load modules.
         
         Args:
-            conn: Database connection
+            db: MongoDB database instance
             openai_client: OpenAI client instance
             limitless_client: Limitless client instance
             config: Configuration dict from config.yaml
         """
-        self.conn = conn
+        self.db = db
         self.openai_client = openai_client
         self.limitless_client = limitless_client
         self.config = config
@@ -59,7 +59,7 @@ class ModuleRegistry:
             try:
                 # Instantiate module
                 module = ModuleClass(
-                    self.conn,
+                    self.db,
                     self.openai_client,
                     self.limitless_client,
                     module_config

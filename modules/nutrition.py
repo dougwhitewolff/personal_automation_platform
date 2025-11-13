@@ -55,129 +55,65 @@ class NutritionModule(BaseModule):
             ]
     
     def setup_database(self):
-        """Create all nutrition-related tables"""
-        cursor = self.conn.cursor()
-        
-        # Food logs
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS food_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date DATE NOT NULL,
-                timestamp DATETIME NOT NULL,
-                item TEXT NOT NULL,
-                calories REAL,
-                protein_g REAL,
-                carbs_g REAL,
-                fat_g REAL,
-                fiber_g REAL,
-                is_custom_food BOOLEAN DEFAULT 0,
-                custom_food_name TEXT,
-                lifelog_id TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
+        """Create all nutrition-related collections and indexes"""
+        # Food logs collection
+        food_logs = self.db["food_logs"]
+        food_logs.create_index([("date", 1), ("timestamp", 1)])
+        food_logs.create_index("lifelog_id")
         
         # Custom foods database
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS custom_foods (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT UNIQUE NOT NULL,
-                aliases TEXT,
-                calories REAL NOT NULL,
-                protein_g REAL NOT NULL,
-                carbs_g REAL NOT NULL,
-                fat_g REAL NOT NULL,
-                fiber_g REAL DEFAULT 0,
-                notes TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
+        custom_foods = self.db["custom_foods"]
+        custom_foods.create_index("name", unique=True)
         
         # Hydration logs
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS hydration_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date DATE NOT NULL,
-                timestamp DATETIME NOT NULL,
-                amount_oz REAL NOT NULL,
-                lifelog_id TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
+        hydration_logs = self.db["hydration_logs"]
+        hydration_logs.create_index([("date", 1), ("timestamp", 1)])
+        hydration_logs.create_index("lifelog_id")
         
         # Sleep logs
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS sleep_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date DATE UNIQUE NOT NULL,
-                hours REAL NOT NULL,
-                sleep_score INTEGER,
-                quality_notes TEXT,
-                lifelog_id TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
+        sleep_logs = self.db["sleep_logs"]
+        sleep_logs.create_index("date", unique=True)
+        sleep_logs.create_index("lifelog_id")
         
         # Daily health markers
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS daily_health (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date DATE UNIQUE NOT NULL,
-                weight_lbs REAL,
-                bowel_movements INTEGER DEFAULT 0,
-                electrolytes_taken BOOLEAN DEFAULT 0,
-                lifelog_id TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
+        daily_health = self.db["daily_health"]
+        daily_health.create_index("date", unique=True)
+        daily_health.create_index("lifelog_id")
         
         # Wellness scores
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS wellness_scores (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date DATE NOT NULL,
-                timestamp DATETIME NOT NULL,
-                mood TEXT,
-                stress_level INTEGER,
-                hunger_score INTEGER,
-                energy_score INTEGER,
-                soreness_score INTEGER,
-                notes TEXT,
-                lifelog_id TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        self.conn.commit()
+        wellness_scores = self.db["wellness_scores"]
+        wellness_scores.create_index([("date", 1), ("timestamp", 1)])
+        wellness_scores.create_index("lifelog_id")
         
         # Load custom foods from config
         self._load_custom_foods()
     
     def _load_custom_foods(self):
         """Load custom foods from configuration"""
+        custom_foods_collection = self.db["custom_foods"]
         custom_foods = self.config.get('custom_foods', [])
-        cursor = self.conn.cursor()
         
         for food in custom_foods:
             try:
-                cursor.execute('''
-                    INSERT OR REPLACE INTO custom_foods 
-                    (name, aliases, calories, protein_g, carbs_g, fat_g, fiber_g, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    food['name'],
-                    json.dumps(food.get('aliases', [])),
-                    food['calories'],
-                    food['protein_g'],
-                    food['carbs_g'],
-                    food['fat_g'],
-                    food.get('fiber_g', 0),
-                    food.get('notes', '')
-                ))
+                custom_foods_collection.update_one(
+                    {"name": food['name']},
+                    {
+                        "$set": {
+                            "name": food['name'],
+                            "aliases": food.get('aliases', []),
+                            "calories": food['calories'],
+                            "protein_g": food['protein_g'],
+                            "carbs_g": food['carbs_g'],
+                            "fat_g": food['fat_g'],
+                            "fiber_g": food.get('fiber_g', 0),
+                            "notes": food.get('notes', ''),
+                            "created_at": datetime.now()
+                        }
+                    },
+                    upsert=True
+                )
             except Exception as e:
                 print(f"⚠️  Failed to load custom food {food.get('name')}: {e}")
-        
-        self.conn.commit()
     
     async def handle_log(self, message_content: str, lifelog_id: str, 
                         analysis: Dict) -> Dict:
@@ -343,13 +279,18 @@ Respond with ONLY valid JSON:
     
     def _get_custom_foods_context(self) -> str:
         """Get custom foods as context for AI"""
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT name, aliases, calories, protein_g, carbs_g, fat_g, fiber_g FROM custom_foods')
-        foods = cursor.fetchall()
+        custom_foods_collection = self.db["custom_foods"]
+        foods = custom_foods_collection.find({})
         
         context = "CUSTOM FOODS DATABASE (check these first):\n"
-        for name, aliases_json, cal, protein, carbs, fat, fiber in foods:
-            aliases = json.loads(aliases_json)
+        for food in foods:
+            name = food.get('name')
+            aliases = food.get('aliases', [])
+            cal = food.get('calories', 0)
+            protein = food.get('protein_g', 0)
+            carbs = food.get('carbs_g', 0)
+            fat = food.get('fat_g', 0)
+            fiber = food.get('fiber_g', 0)
             context += f"- {name}: {aliases} → {cal} cal, {protein}g protein, {carbs}g carbs, {fat}g fat, {fiber}g fiber\n"
         
         return context
@@ -396,145 +337,188 @@ Respond with ONLY valid JSON:
         if not foods:
             return
         
-        cursor = self.conn.cursor()
+        food_logs_collection = self.db["food_logs"]
         today = date.today()
         now = datetime.now()
         
+        documents = []
         for food in foods:
-            cursor.execute('''
-                INSERT INTO food_logs 
-                (date, timestamp, item, calories, protein_g, carbs_g, fat_g, fiber_g,
-                 is_custom_food, custom_food_name, lifelog_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                today, now, food['item'],
-                food.get('calories', 0),
-                food.get('protein_g', 0),
-                food.get('carbs_g', 0),
-                food.get('fat_g', 0),
-                food.get('fiber_g', 0),
-                food.get('is_custom_food', False),
-                food.get('custom_food_name'),
-                lifelog_id
-            ))
+            documents.append({
+                "date": today.isoformat(),
+                "timestamp": now.isoformat(),
+                "item": food['item'],
+                "calories": food.get('calories', 0),
+                "protein_g": food.get('protein_g', 0),
+                "carbs_g": food.get('carbs_g', 0),
+                "fat_g": food.get('fat_g', 0),
+                "fiber_g": food.get('fiber_g', 0),
+                "is_custom_food": food.get('is_custom_food', False),
+                "custom_food_name": food.get('custom_food_name'),
+                "lifelog_id": lifelog_id,
+                "created_at": now
+            })
         
-        self.conn.commit()
+        if documents:
+            food_logs_collection.insert_many(documents)
     
     def _store_hydration(self, hydration: Dict, lifelog_id: str):
         """Store hydration logs"""
         if not hydration.get('detected'):
             return
         
-        cursor = self.conn.cursor()
+        hydration_logs_collection = self.db["hydration_logs"]
         today = date.today()
         now = datetime.now()
         
+        documents = []
         for entry in hydration.get('entries', []):
-            cursor.execute('''
-                INSERT INTO hydration_logs (date, timestamp, amount_oz, lifelog_id)
-                VALUES (?, ?, ?, ?)
-            ''', (today, now, entry['amount_oz'], lifelog_id))
+            documents.append({
+                "date": today.isoformat(),
+                "timestamp": now.isoformat(),
+                "amount_oz": entry['amount_oz'],
+                "lifelog_id": lifelog_id,
+                "created_at": now
+            })
         
-        self.conn.commit()
+        if documents:
+            hydration_logs_collection.insert_many(documents)
     
     def _store_sleep(self, sleep: Dict, lifelog_id: str):
         """Store sleep logs"""
         if not sleep.get('detected'):
             return
         
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO sleep_logs 
-            (date, hours, sleep_score, quality_notes, lifelog_id)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (
-            date.today(),
-            sleep['hours'],
-            sleep.get('sleep_score'),
-            sleep.get('quality'),
-            lifelog_id
-        ))
+        sleep_logs_collection = self.db["sleep_logs"]
+        today = date.today()
         
-        self.conn.commit()
+        sleep_logs_collection.update_one(
+            {"date": today.isoformat()},
+            {
+                "$set": {
+                    "date": today.isoformat(),
+                    "hours": sleep['hours'],
+                    "sleep_score": sleep.get('sleep_score'),
+                    "quality_notes": sleep.get('quality'),
+                    "lifelog_id": lifelog_id,
+                    "created_at": datetime.now()
+                }
+            },
+            upsert=True
+        )
     
     def _store_health_markers(self, health: Dict, lifelog_id: str):
         """Store health markers"""
         if not any(health.values()):
             return
         
-        cursor = self.conn.cursor()
+        daily_health_collection = self.db["daily_health"]
         today = date.today()
         
-        cursor.execute('''
-            INSERT INTO daily_health (date, weight_lbs, bowel_movements, electrolytes_taken, lifelog_id)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(date) DO UPDATE SET
-                weight_lbs = COALESCE(excluded.weight_lbs, weight_lbs),
-                bowel_movements = bowel_movements + excluded.bowel_movements,
-                electrolytes_taken = excluded.electrolytes_taken OR electrolytes_taken,
-                lifelog_id = excluded.lifelog_id
-        ''', (
-            today,
-            health.get('weight_lbs'),
-            health.get('bowel_movements', 0),
-            health.get('electrolytes_taken', False),
-            lifelog_id
-        ))
+        # Get existing document if it exists
+        existing = daily_health_collection.find_one({"date": today.isoformat()})
         
-        self.conn.commit()
+        update_data = {
+            "date": today.isoformat(),
+            "lifelog_id": lifelog_id,
+            "created_at": datetime.now()
+        }
+        
+        # Update weight if provided
+        if health.get('weight_lbs') is not None:
+            update_data["weight_lbs"] = health.get('weight_lbs')
+        elif existing:
+            update_data["weight_lbs"] = existing.get('weight_lbs')
+        
+        # Increment bowel movements
+        if health.get('bowel_movements', 0) > 0:
+            update_data["bowel_movements"] = (existing.get('bowel_movements', 0) if existing else 0) + health.get('bowel_movements', 0)
+        elif existing:
+            update_data["bowel_movements"] = existing.get('bowel_movements', 0)
+        else:
+            update_data["bowel_movements"] = 0
+        
+        # Update electrolytes
+        if health.get('electrolytes_taken') is not None:
+            update_data["electrolytes_taken"] = health.get('electrolytes_taken') or (existing.get('electrolytes_taken', False) if existing else False)
+        elif existing:
+            update_data["electrolytes_taken"] = existing.get('electrolytes_taken', False)
+        else:
+            update_data["electrolytes_taken"] = False
+        
+        daily_health_collection.update_one(
+            {"date": today.isoformat()},
+            {"$set": update_data},
+            upsert=True
+        )
     
     def _store_wellness(self, wellness: Dict, lifelog_id: str):
         """Store wellness scores"""
         if not any(v is not None for v in wellness.values()):
             return
         
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            INSERT INTO wellness_scores 
-            (date, timestamp, mood, stress_level, hunger_score, energy_score, soreness_score, lifelog_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            date.today(), datetime.now(),
-            wellness.get('mood'),
-            wellness.get('stress_level'),
-            wellness.get('hunger_score'),
-            wellness.get('energy_score'),
-            wellness.get('soreness_score'),
-            lifelog_id
-        ))
+        wellness_scores_collection = self.db["wellness_scores"]
+        today = date.today()
+        now = datetime.now()
         
-        self.conn.commit()
+        wellness_scores_collection.insert_one({
+            "date": today.isoformat(),
+            "timestamp": now.isoformat(),
+            "mood": wellness.get('mood'),
+            "stress_level": wellness.get('stress_level'),
+            "hunger_score": wellness.get('hunger_score'),
+            "energy_score": wellness.get('energy_score'),
+            "soreness_score": wellness.get('soreness_score'),
+            "lifelog_id": lifelog_id,
+            "created_at": now
+        })
     
     def _get_daily_summary_internal(self, date_obj: date) -> Dict:
         """Calculate daily totals and progress"""
-        cursor = self.conn.cursor()
+        date_str = date_obj.isoformat()
         
         # Food totals
-        cursor.execute('''
-            SELECT 
-                COALESCE(SUM(calories), 0),
-                COALESCE(SUM(protein_g), 0),
-                COALESCE(SUM(carbs_g), 0),
-                COALESCE(SUM(fat_g), 0),
-                COALESCE(SUM(fiber_g), 0)
-            FROM food_logs WHERE date = ?
-        ''', (date_obj,))
-        
-        totals = cursor.fetchone()
+        food_logs_collection = self.db["food_logs"]
+        food_pipeline = [
+            {"$match": {"date": date_str}},
+            {"$group": {
+                "_id": None,
+                "calories": {"$sum": "$calories"},
+                "protein_g": {"$sum": "$protein_g"},
+                "carbs_g": {"$sum": "$carbs_g"},
+                "fat_g": {"$sum": "$fat_g"},
+                "fiber_g": {"$sum": "$fiber_g"}
+            }}
+        ]
+        food_result = list(food_logs_collection.aggregate(food_pipeline))
+        if food_result:
+            totals = (
+                food_result[0].get("calories", 0),
+                food_result[0].get("protein_g", 0),
+                food_result[0].get("carbs_g", 0),
+                food_result[0].get("fat_g", 0),
+                food_result[0].get("fiber_g", 0)
+            )
+        else:
+            totals = (0, 0, 0, 0, 0)
         
         # Hydration
-        cursor.execute('SELECT COALESCE(SUM(amount_oz), 0) FROM hydration_logs WHERE date = ?', (date_obj,))
-        water = cursor.fetchone()[0]
+        hydration_logs_collection = self.db["hydration_logs"]
+        hydration_pipeline = [
+            {"$match": {"date": date_str}},
+            {"$group": {"_id": None, "total_oz": {"$sum": "$amount_oz"}}}
+        ]
+        hydration_result = list(hydration_logs_collection.aggregate(hydration_pipeline))
+        water = hydration_result[0].get("total_oz", 0) if hydration_result else 0
         
         # Sleep data
-        sleep_logs_collection = self.conn["sleep_logs"]
+        sleep_logs_collection = self.db["sleep_logs"]
         sleep_data = sleep_logs_collection.find_one({"date": date_str})
         sleep_hours = sleep_data.get("hours") if sleep_data else None
         sleep_score = sleep_data.get("sleep_score") if sleep_data else None
         sleep_quality = sleep_data.get("quality_notes") if sleep_data else None
         
         # Health markers (bowel movements, weight)
-        daily_health_collection = self.conn["daily_health"]
+        daily_health_collection = self.db["daily_health"]
         health_data = daily_health_collection.find_one({"date": date_str})
         bowel_movements = health_data.get("bowel_movements", 0) if health_data else 0
         weight_lbs = health_data.get("weight_lbs") if health_data else None
@@ -585,15 +569,23 @@ Respond with ONLY valid JSON:
     def _calculate_targets(self, date_obj: date) -> Dict:
         """Calculate daily macro targets based on training"""
         # Get exercise data from workout module
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            SELECT COALESCE(SUM(calories_burned), 0), COALESCE(SUM(duration_minutes), 0)
-            FROM exercise_logs WHERE date = ?
-        ''', (date_obj,))
-        
-        exercise_data = cursor.fetchone()
-        exercise_calories = exercise_data[0] or 0
-        exercise_minutes = exercise_data[1] or 0
+        date_str = date_obj.isoformat()
+        exercise_logs_collection = self.db["exercise_logs"]
+        exercise_pipeline = [
+            {"$match": {"date": date_str}},
+            {"$group": {
+                "_id": None,
+                "total_calories": {"$sum": "$calories_burned"},
+                "total_minutes": {"$sum": "$duration_minutes"}
+            }}
+        ]
+        exercise_result = list(exercise_logs_collection.aggregate(exercise_pipeline))
+        if exercise_result:
+            exercise_calories = exercise_result[0].get("total_calories", 0) or 0
+            exercise_minutes = exercise_result[0].get("total_minutes", 0) or 0
+        else:
+            exercise_calories = 0
+            exercise_minutes = 0
         
         # Get base targets from config
         daily_targets = self.config.get('daily_targets', {})

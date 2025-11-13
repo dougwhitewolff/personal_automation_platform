@@ -77,7 +77,7 @@ async def get_summary_for_date(registry, target_date: date, channel=None):
         return embed
 
 
-def setup_bot(token: str, channel_id: int, registry, conn, orchestrator=None):
+def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
     """
     Setup and configure Discord bot.
     
@@ -85,7 +85,7 @@ def setup_bot(token: str, channel_id: int, registry, conn, orchestrator=None):
         token: Discord bot token
         channel_id: Channel ID to monitor
         registry: Module registry for routing
-        conn: Database connection
+        db: MongoDB database instance
         orchestrator: AutomationOrchestrator instance for semantic routing
         
     Returns:
