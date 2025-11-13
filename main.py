@@ -16,6 +16,7 @@ import time
 from datetime import datetime, date
 import yaml
 import re
+import asyncio
 
 # Import core services (lazy Discord import handled in core/__init__.py)
 from core import (
@@ -29,6 +30,26 @@ from core import (
 from core.database import get_last_processed_time, update_last_processed_time
 from core.env_loader import get_env, validate_required_vars
 from modules import ModuleRegistry
+
+# Global reference to Discord channel (set after bot is ready)
+_discord_channel = None
+
+def set_discord_channel(channel):
+    """Set the Discord channel for Limitless notifications"""
+    global _discord_channel
+    _discord_channel = channel
+
+async def send_limitless_notification(embed=None, content=None):
+    """Send notification from Limitless polling loop via bot"""
+    global _discord_channel
+    if _discord_channel:
+        try:
+            if embed:
+                await _discord_channel.send(embed=embed)
+            elif content:
+                await _discord_channel.send(content)
+        except Exception as e:
+            print(f"❌ Failed to send Discord notification: {e}")
 
 
 def load_config() -> dict:
@@ -63,7 +84,6 @@ def validate_environment() -> None:
 
 def await_sync(coro):
     """Run an async coroutine from synchronous context."""
-    import asyncio
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:
@@ -169,13 +189,7 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                         summary_embed = await_sync(get_summary_for_date(registry, target_date, channel=None))
                         
                         if summary_embed:
-                            from core.discord_bot import send_webhook_notification
-                            webhook_url = get_env("DISCORD_WEBHOOK_URL")
-                            if webhook_url:
-                                send_webhook_notification(
-                                    webhook_url,
-                                    {"embeds": [summary_embed.to_dict()]},
-                                )
+                            await_sync(send_limitless_notification(embed=summary_embed))
                         continue
                     
                     # Skip entries without "Log that" (unless it was a summary request)
@@ -185,103 +199,116 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                 if routing_decision.get("error"):
                     print(f"⚠️  Orchestrator error: {routing_decision['error']}")
                     # Send error notification to Discord
-                    from core.discord_bot import send_webhook_notification
-                    webhook_url = get_env("DISCORD_WEBHOOK_URL")
-                    if webhook_url:
-                        import discord
-                        error_embed = discord.Embed(
-                            title="❌ Routing Error",
-                            description=f"Failed to route entry: {routing_decision['error']}",
-                            color=0xFF0000
-                        )
-                        send_webhook_notification(
-                            webhook_url,
-                            {"embeds": [error_embed.to_dict()]},
-                        )
+                    import discord
+                    error_embed = discord.Embed(
+                        title="❌ Routing Error",
+                        description=f"Failed to route entry: {routing_decision['error']}",
+                        color=0xFF0000
+                    )
+                    await_sync(send_limitless_notification(embed=error_embed))
                     continue
                 
                 if routing_decision.get("out_of_scope") or not routing_decision.get("modules"):
                     print(f"ℹ️  Entry {entry['id']} is out of scope or no modules matched")
                     # Send notification that nothing was logged
-                    from core.discord_bot import send_webhook_notification
-                    webhook_url = get_env("DISCORD_WEBHOOK_URL")
-                    if webhook_url:
-                        import discord
-                        info_embed = discord.Embed(
-                            title="ℹ️ No Action Taken",
-                            description=f"Entry detected but no matching modules found.\n\nReasoning: {routing_decision.get('reasoning', 'Unknown')}",
-                            color=0xFFFF00
-                        )
-                        send_webhook_notification(
-                            webhook_url,
-                            {"embeds": [info_embed.to_dict()]},
-                        )
+                    import discord
+                    info_embed = discord.Embed(
+                        title="ℹ️ No Action Taken",
+                        description=f"Entry detected but no matching modules found.\n\nReasoning: {routing_decision.get('reasoning', 'Unknown')}",
+                        color=0xFFFF00
+                    )
+                    await_sync(send_limitless_notification(embed=info_embed))
                     continue
                 
-                # Step 5: Process each selected module
-                for module_decision in routing_decision["modules"]:
+                # Step 5: Process each selected module in parallel
+                async def process_module_async(module_decision, context_transcript, entry_id, action):
+                    """Process a single module asynchronously"""
                     module_name = module_decision["name"]
-                    action = module_decision["action"]
                     confidence = module_decision.get("confidence", 0.8)
                     
                     # Find module in registry
                     module = None
-                    for mod in registry.get_all_modules():
+                    for mod in registry.modules:
                         if mod.get_name() == module_name:
                             module = mod
                             break
                     
                     if not module:
                         print(f"⚠️  Module '{module_name}' not found in registry")
-                        continue
+                        return None
                     
                     # Only process if confidence is high enough
                     if confidence < 0.7:
                         print(f"⚠️  Skipping {module_name} due to low confidence ({confidence:.2f})")
-                        continue
+                        return None
                     
                     try:
                         print(
                             f"🧩 ROUTING: {module_name} ({action}, confidence: {confidence:.2f}) "
-                            f"for entry {entry['id']}"
+                            f"for entry {entry_id}"
                         )
                         
                         # Execute appropriate action
-                        # Pass context_transcript instead of just markdown
                         if action == "log":
-                            result = await_sync(
-                                module.handle_log(
-                                    context_transcript, entry["id"], {}
-                                )
+                            result = await module.handle_log(
+                                context_transcript, entry_id, {}
                             )
                         elif action == "query":
                             # For queries, we'd typically need a question, but in "log that" context
                             # it's usually a log action. Handle as log for now.
-                            result = await_sync(
-                                module.handle_log(
-                                    context_transcript, entry["id"], {}
-                                )
+                            result = await module.handle_log(
+                                context_transcript, entry_id, {}
                             )
                         else:
                             print(f"⚠️  Unknown action: {action}")
-                            continue
+                            return None
                         
-                        # Send Discord notification
-                        if result and result.get("embed"):
-                            from core.discord_bot import send_webhook_notification
-                            webhook_url = get_env("DISCORD_WEBHOOK_URL")
-                            if webhook_url:
-                                send_webhook_notification(
-                                    webhook_url,
-                                    {"embeds": [result["embed"].to_dict()]},
-                                )
+                        return {"module_name": module_name, "result": result}
                     
                     except Exception as e:
-                        print(
-                            f"❌ ERROR processing {module_name} for entry {entry['id']}: {e}"
-                        )
+                        print(f"❌ ERROR processing {module_name} for entry {entry_id}: {e}")
                         import traceback
                         traceback.print_exc()
+                        return {"module_name": module_name, "error": str(e)}
+                
+                # Process all modules in parallel
+                if len(routing_decision["modules"]) > 1:
+                    # Multiple modules - process in parallel
+                    tasks = [
+                        process_module_async(
+                            module_decision, 
+                            context_transcript, 
+                            entry["id"],
+                            module_decision.get("action", "log")
+                        )
+                        for module_decision in routing_decision["modules"]
+                    ]
+                    module_results = await_sync(asyncio.gather(*tasks, return_exceptions=True))
+                else:
+                    # Single module - process normally
+                    module_decision = routing_decision["modules"][0]
+                    result = await_sync(
+                        process_module_async(
+                            module_decision,
+                            context_transcript,
+                            entry["id"],
+                            module_decision.get("action", "log")
+                        )
+                    )
+                    module_results = [result] if result else []
+                
+                # Send Discord notifications for all results
+                for module_result in module_results:
+                    if module_result is None or isinstance(module_result, Exception):
+                        continue
+                    
+                    if module_result.get("error"):
+                        # Error already logged in process_module_async
+                        continue
+                    
+                    result = module_result.get("result")
+                    if result and result.get("embed"):
+                        await_sync(send_limitless_notification(embed=result["embed"]))
 
             time.sleep(poll_interval)
 

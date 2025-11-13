@@ -103,6 +103,12 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
     @bot.event
     async def on_ready():
         print(f'✅ Discord bot connected as {bot.user}')
+        # Set channel for Limitless notifications
+        from main import set_discord_channel
+        channel = bot.get_channel(channel_id)
+        if channel:
+            set_discord_channel(channel)
+            print(f'✅ Discord channel set for Limitless notifications')
     
     @bot.event
     async def on_message(message):
@@ -135,12 +141,14 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
         # Use orchestrator for semantic routing if available
         if orchestrator:
             try:
-                # Route via orchestrator
-                routing_decision = orchestrator.route_intent(
-                    transcript=content,
-                    source="discord",
-                    context={"message_id": str(message.id)}
-                )
+                # Show typing indicator during routing
+                async with message.channel.typing():
+                    # Route via orchestrator
+                    routing_decision = orchestrator.route_intent(
+                        transcript=content,
+                        source="discord",
+                        context={"message_id": str(message.id)}
+                    )
                 
                 # Handle routing decision
                 if routing_decision.get("error"):
@@ -152,7 +160,8 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
                 # Check for summary request
                 if routing_decision.get("summary_request"):
                     target_date = routing_decision.get("summary_date", date.today())
-                    await get_summary_for_date(registry, target_date, message.channel)
+                    async with message.channel.typing():
+                        await get_summary_for_date(registry, target_date, message.channel)
                     return
                 
                 # Check for direct answer (in-scope but no module routing)
@@ -178,8 +187,9 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
                     )
                     return
                 
-                # Process each selected module
-                for module_decision in modules_to_process:
+                # Process modules in parallel if multiple are selected
+                async def process_module(module_decision, content, message_id):
+                    """Process a single module and return result"""
                     module_name = module_decision["name"]
                     action = module_decision["action"]
                     confidence = module_decision.get("confidence", 0.8)
@@ -192,40 +202,71 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
                             break
                     
                     if not module:
-                        continue
+                        return None
                     
                     # Only process if confidence is high enough
                     if confidence < 0.7:
-                        continue
+                        return None
                     
                     try:
                         if action == "query":
                             # Handle as question
                             print(f"🧠 Routing query to {module_name} (confidence: {confidence:.2f})")
                             answer = await module.handle_query(content, {})
-                            await message.channel.send(answer)
+                            return {"type": "query", "module_name": module_name, "answer": answer}
                         
                         elif action == "log":
                             # Handle as log command
                             print(f"📝 Routing log to {module_name} (confidence: {confidence:.2f})")
                             result = await module.handle_log(
                                 content,
-                                f"discord_{message.id}",
+                                f"discord_{message_id}",
                                 {}
                             )
-                            
-                            if result and result.get("embed"):
-                                await message.channel.send(embed=result["embed"])
-                            elif result and result.get("message"):
-                                await message.channel.send(result["message"])
-                        
+                            return {"type": "log", "module_name": module_name, "result": result}
+                    
                     except Exception as e:
                         print(f"❌ Error processing {module_name}: {e}")
                         import traceback
                         traceback.print_exc()
+                        return {"type": "error", "module_name": module_name, "error": str(e)}
+                
+                # Show typing indicator while processing
+                async with message.channel.typing():
+                    # Process all modules in parallel
+                    if len(modules_to_process) > 1:
+                        # Multiple modules - process in parallel
+                        tasks = [
+                            process_module(module_decision, content, message.id)
+                            for module_decision in modules_to_process
+                        ]
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
+                    else:
+                        # Single module - process normally
+                        results = [await process_module(modules_to_process[0], content, message.id)]
+                
+                # Send all results
+                for result in results:
+                    if result is None:
+                        continue
+                    
+                    if isinstance(result, Exception):
                         await message.channel.send(
-                            f"❌ Error processing with {module_name} module: {str(e)}"
+                            f"❌ Error processing module: {str(result)}"
                         )
+                        continue
+                    
+                    if result.get("type") == "error":
+                        await message.channel.send(
+                            f"❌ Error processing with {result['module_name']} module: {result['error']}"
+                        )
+                    elif result.get("type") == "query":
+                        await message.channel.send(result["answer"])
+                    elif result.get("type") == "log":
+                        if result["result"] and result["result"].get("embed"):
+                            await message.channel.send(embed=result["result"]["embed"])
+                        elif result["result"] and result["result"].get("message"):
+                            await message.channel.send(result["result"]["message"])
                 
                 return  # Don't process commands if orchestrator handled it
                 
@@ -244,7 +285,8 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
                 print(f"✅ Question match for module: {module.get_name()} (fallback)")
 
                 try:
-                    answer = await module.handle_query(content, {})
+                    async with message.channel.typing():
+                        answer = await module.handle_query(content, {})
                     await message.channel.send(answer)
                 except Exception as e:
                     print(f"❌ Error answering query: {e}")
@@ -406,7 +448,8 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
         else:
             target_date = date.today()
         
-        await get_summary_for_date(registry, target_date, ctx.channel)
+        async with ctx.channel.typing():
+            await get_summary_for_date(registry, target_date, ctx.channel)
     
     @bot.command(name='help')
     async def help_command(ctx):
@@ -453,17 +496,14 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
 
 def send_webhook_notification(webhook_url: str, embed_data: Dict):
     """
-    Send notification via webhook (one-way, no bot needed).
+    DEPRECATED: Send notification via webhook (one-way, no bot needed).
+    
+    This function is kept for backwards compatibility but is no longer used.
+    All notifications now go through the Discord bot.
     
     Args:
-        webhook_url: Discord webhook URL
-        embed_data: Embed configuration
+        webhook_url: Discord webhook URL (unused)
+        embed_data: Embed configuration (unused)
     """
-    import requests
-    
-    try:
-        response = requests.post(webhook_url, json=embed_data)
-        return response.status_code == 204
-    except Exception as e:
-        print(f"❌ Webhook failed: {e}")
-        return False
+    print("⚠️  send_webhook_notification is deprecated. Use bot.send() instead.")
+    return False
