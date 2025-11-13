@@ -157,8 +157,7 @@ def main():
     config = load_config()
 
     # 3. Initialize database
-    db_path = get_env("DATABASE_PATH", "./nutrition_tracker.db")
-    conn = init_database(db_path)
+    conn = init_database()  # Uses MONGODB_URL from environment
 
     # 4. Initialize clients
     limitless_client = LimitlessClient(get_env("LIMITLESS_API_KEY"))

@@ -164,7 +164,7 @@ DISCORD_CHANNEL_ID=your_channel_id
 DISCORD_WEBHOOK_URL=your_webhook_url  # For one-way notifications
 TIMEZONE=America/Los_Angeles
 POLL_INTERVAL=2  # Seconds between Limitless polls
-DATABASE_PATH=./nutrition_tracker.db
+MONGODB_URL=mongodb://localhost:27017/automation_platform  # MongoDB connection URL
 ```
 
 ## Discord Setup
