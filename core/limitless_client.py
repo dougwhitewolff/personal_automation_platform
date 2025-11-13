@@ -31,7 +31,10 @@ class LimitlessClient:
         self,
         start_time: Optional[str] = None,
         limit: int = 10,
-        timezone: str = "America/Los_Angeles"
+        timezone: str = "America/Los_Angeles",
+        include_contents: bool = False,
+        include_headings: bool = True,
+        is_starred: Optional[bool] = None
     ) -> List[Dict]:
         """
         Poll for recent lifelog entries.
@@ -53,8 +56,13 @@ class LimitlessClient:
         params = {
             "limit": str(min(limit, 10)),          # ensure string type
             "direction": "desc",
-            "includeMarkdown": "true"              # must be lowercase string
+            "includeMarkdown": "true",             # must be lowercase string
+            "includeHeadings": "true" if include_headings else "false",
+            "includeContents": "true" if include_contents else "false"
         }
+
+        if is_starred is not None:
+            params["isStarred"] = "true" if is_starred else "false"
 
         if start_time:
             clean_start = start_time.replace("T", " ").split("Z")[0].split(".")[0]
@@ -168,23 +176,36 @@ class LimitlessClient:
         return transcript
 
     # -------------------------------------------------------------------------
-    # 3. Search lifelogs
+    # 3. Search lifelogs (with pagination support)
     # -------------------------------------------------------------------------
     def search_lifelogs(
         self,
         query: str,
         date_filter: Optional[str] = None,
-        limit: int = 10
+        limit: int = 10,
+        include_contents: bool = False,
+        include_headings: bool = True,
+        is_starred: Optional[bool] = None,
+        timezone: str = "America/Los_Angeles"
     ) -> List[Dict]:
-        """Search lifelogs using hybrid (semantic + keyword) search."""
+        """
+        Search lifelogs using hybrid (semantic + keyword) search.
+        Note: Cursor pagination is NOT supported when using search parameter.
+        """
         params = {
             "search": query,
             "limit": min(limit, 10),
-            "includeMarkdown": "true"
+            "includeMarkdown": "true",
+            "includeHeadings": "true" if include_headings else "false",
+            "includeContents": "true" if include_contents else "false",
+            "timezone": timezone
         }
 
         if date_filter:
             params["date"] = date_filter
+
+        if is_starred is not None:
+            params["isStarred"] = "true" if is_starred else "false"
 
         try:
             response = requests.get(
@@ -204,3 +225,38 @@ class LimitlessClient:
         except requests.exceptions.RequestException as e:
             print(f"❌ Search request failed: {e}")
             return []
+
+    # -------------------------------------------------------------------------
+    # 4. Get lifelog by ID
+    # -------------------------------------------------------------------------
+    def get_lifelog_by_id(
+        self,
+        lifelog_id: str,
+        include_contents: bool = False,
+        include_headings: bool = True
+    ) -> Optional[Dict]:
+        """Get a specific lifelog entry by ID."""
+        params = {
+            "includeMarkdown": "true",
+            "includeHeadings": "true" if include_headings else "false",
+            "includeContents": "true" if include_contents else "false"
+        }
+
+        try:
+            response = requests.get(
+                f"{self.base_url}/lifelogs/{lifelog_id}",
+                params=params,
+                headers=self.headers,
+                timeout=15
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("data", {}).get("lifelog", None)
+
+            print(f"❌ Get lifelog failed {response.status_code}: {response.text}")
+            return None
+
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Get lifelog request failed: {e}")
+            return None

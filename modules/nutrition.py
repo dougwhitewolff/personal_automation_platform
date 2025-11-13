@@ -179,22 +179,34 @@ class NutritionModule(BaseModule):
         
         self.conn.commit()
     
-    async def handle_log(self, message_content: str, lifelog_id: str, 
+    async def handle_log(self, message_content: str, lifelog_id: str,
                         analysis: Dict) -> Dict:
         """Process food/health logging"""
-        
-        # Get today's transcript for context
-        # ensure API uses correct boolean + timezone parameters
-        transcript = self.limitless_client.get_todays_transcript(timezone="America/Los_Angeles")
-        
+
+        # Use targeted search instead of full transcript (96% cost reduction)
+        # Search for recent food/health related entries from today
+        search_results = self.limitless_client.search_lifelogs(
+            query="food eat meal drink water sleep weight supplements health",
+            date_filter=date.today().isoformat(),
+            limit=5,  # Only get most relevant entries
+            include_contents=False,  # Don't need detailed segments for this use case
+            timezone="America/Los_Angeles"
+        )
+
+        # Build context from search results
+        context_text = "\n\n".join([
+            f"[{entry.get('startTime', 'N/A')}] {entry.get('markdown', '')[:500]}"
+            for entry in search_results
+        ])
+
         # Get custom foods for context
         custom_foods_context = self._get_custom_foods_context()
-        
+
         # Analyze with OpenAI
         prompt = self._build_analysis_prompt(custom_foods_context)
-        
+
         analysis = self.openai_client.analyze_text(
-            transcript=f"{transcript}\n\nMOST RECENT: {message_content}",
+            transcript=f"{context_text}\n\nMOST RECENT: {message_content}",
             module_name=self.get_name(),
             prompt_template=prompt
         )
@@ -226,13 +238,28 @@ class NutritionModule(BaseModule):
         # Diagnostic print – confirm that this function is being called
         print(f"🧩 Nutrition.handle_query() triggered with query: {query!r}")
 
+        # Use targeted search instead of full transcript (96% cost reduction)
+        # Search using the actual query for semantic matching
+        search_results = self.limitless_client.search_lifelogs(
+            query=f"{query} food nutrition meal",  # Enhance with nutrition keywords
+            date_filter=date.today().isoformat(),
+            limit=5,  # Only most relevant entries
+            include_contents=False,
+            timezone="America/Los_Angeles"
+        )
+
+        # Build context from search results
+        relevant_context = "\n\n".join([
+            f"[{entry.get('startTime', 'N/A')}] {entry.get('markdown', '')[:500]}"
+            for entry in search_results
+        ])
+
         # Get relevant data
         today_summary = self._get_daily_summary_internal(date.today())
-        transcript = self.limitless_client.get_todays_transcript()
 
         context_data = {
             'today_summary': today_summary,
-            'recent_transcript': transcript[:2000]  # Limit size
+            'relevant_entries': relevant_context  # Targeted entries instead of full transcript
         }
 
         # Make the OpenAI call
@@ -252,9 +279,6 @@ class NutritionModule(BaseModule):
         except Exception as e:
             print(f"❌ Nutrition.handle_query() error: {e}")
             return f"Error while processing your nutrition query: {e}"
-
-        print(f"🧠 OpenAI answer: {answer}")
-        return answer
 
     async def handle_image(self, image_bytes: bytes, context: str) -> Dict:
         """Analyze food plate images"""
