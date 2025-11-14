@@ -99,6 +99,8 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
     
     # Store pending confirmations (for image analysis)
     pending_confirmations = {}
+    # Store pending module selections (for image routing)
+    pending_module_selections = {}
     
     @bot.event
     async def on_ready():
@@ -363,12 +365,20 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
                 # Ask user
                 msg = await message.channel.send(
                     "I see an image! Which module should process it?\n"
-                    + "\n".join([f"{i+1}️⃣ {mod.get_name()}" 
+                    + "\n".join([f"{i+1}. {mod.get_name()}" 
                                 for i, mod in enumerate(registry.modules)])
                 )
                 # Add reaction options
+                number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
                 for i in range(len(registry.modules)):
-                    await msg.add_reaction(f"{i+1}️⃣")
+                    await msg.add_reaction(number_emojis[i])
+                
+                # Store pending module selection
+                pending_module_selections[msg.id] = {
+                    'image_bytes': image_bytes,
+                    'original_message': message,
+                    'modules': registry.modules
+                }
                 return
             
             try:
@@ -398,12 +408,74 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
     
     @bot.event
     async def on_reaction_add(reaction, user):
-        """Handle confirmation reactions"""
+        """Handle confirmation reactions and module selection reactions"""
         if user.bot:
             return
         
         message_id = reaction.message.id
         
+        # Check for module selection (number emojis)
+        number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
+        if message_id in pending_module_selections:
+            selection = pending_module_selections[message_id]
+            emoji_str = str(reaction.emoji)
+            
+            if emoji_str in number_emojis:
+                # Get selected module index
+                module_index = number_emojis.index(emoji_str)
+                modules = selection['modules']
+                
+                if module_index < len(modules):
+                    selected_module = modules[module_index]
+                    image_bytes = selection['image_bytes']
+                    original_message = selection['original_message']
+                    channel = reaction.message.channel
+                    
+                    # Remove the selection message
+                    try:
+                        await reaction.message.delete()
+                    except:
+                        pass
+                    
+                    # Process image with selected module
+                    try:
+                        async with channel.typing():
+                            result = await selected_module.handle_image(
+                                image_bytes, 
+                                original_message.content or ""
+                            )
+                        
+                        if result.get('needs_confirmation'):
+                            # Send for user confirmation
+                            embed = result['embed']
+                            msg = await channel.send(embed=embed)
+                            await msg.add_reaction('✅')
+                            await msg.add_reaction('❌')
+                            
+                            # Store pending confirmation
+                            pending_confirmations[msg.id] = {
+                                'module': selected_module,
+                                'data': result['data'],
+                                'original_message': original_message
+                            }
+                        else:
+                            # Auto-confirmed
+                            await channel.send(embed=result.get('embed'))
+                            await original_message.add_reaction('✅')
+                        
+                        # Clean up
+                        del pending_module_selections[message_id]
+                        
+                    except Exception as e:
+                        print(f"❌ Error processing image with {selected_module.get_name()}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        await channel.send(f"❌ Error: {str(e)}")
+                        del pending_module_selections[message_id]
+            
+            return
+        
+        # Check for confirmation reactions
         if message_id not in pending_confirmations:
             return
         
