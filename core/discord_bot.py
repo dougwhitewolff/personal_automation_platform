@@ -109,6 +109,24 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
         if channel:
             set_discord_channel(channel)
             print(f'✅ Discord channel set for Limitless notifications')
+            
+            # Send online message to channel
+            try:
+                embed = discord.Embed(
+                    title="🤖 Bot Online",
+                    description="Personal Automation Platform is now online and ready!",
+                    color=0x00ff00,
+                    timestamp=datetime.utcnow()
+                )
+                embed.add_field(
+                    name="Status",
+                    value="✅ All systems operational",
+                    inline=False
+                )
+                await channel.send(embed=embed)
+                print(f'✅ Sent online message to channel')
+            except Exception as e:
+                print(f'⚠️  Failed to send online message: {e}')
     
     @bot.event
     async def on_message(message):

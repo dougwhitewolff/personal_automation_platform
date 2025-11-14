@@ -55,43 +55,11 @@ def init_database(mongodb_url: str = None):
     system_metadata = db["system_metadata"]
     system_metadata.create_index("key", unique=True)
     
-    # Track last processed lifelog
-    processing_state = db["processing_state"]
-    processing_state.create_index("id", unique=True)
-    
-    # Initialize processing state if not exists
-    if processing_state.count_documents({}) == 0:
-        processing_state.insert_one({
-            "id": 1,
-            "last_processed_time": datetime.utcnow().isoformat(),
-            "last_processed_id": None,
-            "updated_at": datetime.utcnow()
-        })
+    # Track processed lifelogs (for deduplication)
+    processed_lifelogs = db["processed_lifelogs"]
+    processed_lifelogs.create_index("lifelog_id", unique=True)
     
     print("✅ Core database initialized")
     return db
 
 
-def get_last_processed_time(db: Database):
-    """Get the last processed timestamp for Limitless polling"""
-    processing_state = db["processing_state"]
-    doc = processing_state.find_one({"id": 1}, sort=[("id", -1)])
-    if doc:
-        return doc.get("last_processed_time", datetime.utcnow().isoformat())
-    return datetime.utcnow().isoformat()
-
-
-def update_last_processed_time(db: Database, timestamp, lifelog_id=None):
-    """Update the last processed timestamp"""
-    processing_state = db["processing_state"]
-    processing_state.update_one(
-        {"id": 1},
-        {
-            "$set": {
-                "last_processed_time": timestamp,
-                "last_processed_id": lifelog_id,
-                "updated_at": datetime.utcnow()
-            }
-        },
-        upsert=True
-    )

@@ -62,11 +62,33 @@ class LimitlessClient:
             clean_start = clean_start.split("+")[0].split("-08:00")[0].strip()
 
             clean_end = now.strftime("%Y-%m-%d %H:%M:%S")
-
-            params.update({
-                "start": clean_start,
-                "end": clean_end
-            })
+            
+            # Validate that start < end (API requirement)
+            # Parse both times to compare
+            try:
+                from datetime import datetime as dt
+                start_dt = dt.strptime(clean_start, "%Y-%m-%d %H:%M:%S")
+                end_dt = dt.strptime(clean_end, "%Y-%m-%d %H:%M:%S")
+                
+                # If start >= end, skip start/end params and use date-based query instead
+                if start_dt >= end_dt:
+                    print(f"⚠️  Start time ({clean_start}) >= end time ({clean_end}), using date-based query instead")
+                    params.update({
+                        "date": now.strftime("%Y-%m-%d"),
+                        "timezone": timezone
+                    })
+                else:
+                    params.update({
+                        "start": clean_start,
+                        "end": clean_end
+                    })
+            except ValueError as e:
+                # If parsing fails, fall back to date-based query
+                print(f"⚠️  Failed to parse timestamps, using date-based query: {e}")
+                params.update({
+                    "date": now.strftime("%Y-%m-%d"),
+                    "timezone": timezone
+                })
         else:
             params.update({
                 "date": now.strftime("%Y-%m-%d"),
@@ -173,18 +195,33 @@ class LimitlessClient:
     def search_lifelogs(
         self,
         query: str,
-        date_filter: Optional[str] = None,
-        limit: int = 10
+        limit: int = 3,
+        timezone: str = "America/Los_Angeles",
+        direction: str = "desc"
     ) -> List[Dict]:
-        """Search lifelogs using hybrid (semantic + keyword) search."""
+        """
+        Search lifelogs using hybrid (semantic + keyword) search.
+        
+        Args:
+            query: Semantic search query (e.g., "log that or summary request")
+            limit: Maximum number of results (default 3 for polling)
+            timezone: Timezone for date filtering (default "America/Los_Angeles")
+            direction: Sort direction - "desc" for newest first, "asc" for oldest first
+        
+        Returns:
+            List of lifelog entries matching the search query
+        """
+        # Use today's date with configured timezone
+        today = date.today().isoformat()
+        
         params = {
             "search": query,
-            "limit": min(limit, 10),
-            "includeMarkdown": "true"
+            "limit": str(min(limit, 10)),
+            "includeMarkdown": "true",
+            # "date": today,
+            # "timezone": timezone,
+            "direction": direction
         }
-
-        if date_filter:
-            params["date"] = date_filter
 
         try:
             response = requests.get(

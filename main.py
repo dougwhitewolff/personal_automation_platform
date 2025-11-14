@@ -15,7 +15,6 @@ import threading
 import time
 from datetime import datetime, date
 import yaml
-import re
 import asyncio
 
 # Import core services (lazy Discord import handled in core/__init__.py)
@@ -27,29 +26,70 @@ from core import (
     AutomationOrchestrator,
     get_setup_bot,   # Lazy import function for Discord bot
 )
-from core.database import get_last_processed_time, update_last_processed_time
 from core.env_loader import get_env, validate_required_vars
 from modules import ModuleRegistry
 
 # Global reference to Discord channel (set after bot is ready)
 _discord_channel = None
+_discord_channel_lock = threading.Lock()
 
 def set_discord_channel(channel):
     """Set the Discord channel for Limitless notifications"""
     global _discord_channel
-    _discord_channel = channel
+    with _discord_channel_lock:
+        _discord_channel = channel
+        print(f'🔧 DEBUG: Channel set in set_discord_channel: {_discord_channel is not None}')
 
 async def send_limitless_notification(embed=None, content=None):
-    """Send notification from Limitless polling loop via bot"""
-    global _discord_channel
-    if _discord_channel:
+    """
+    Send notification from Limitless polling loop via Discord bot.
+    
+    Automatically retries if channel isn't ready yet (bot may still be connecting).
+    This function handles the async nature of bot initialization gracefully.
+    
+    Returns:
+        bool: True if notification was sent successfully, False otherwise
+    """
+    global _discord_channel, _discord_channel_lock
+    
+    # Try to get channel immediately
+    channel = None
+    with _discord_channel_lock:
+        channel = _discord_channel
+    
+    # If channel not set, wait up to 5 seconds for bot to connect
+    # This handles the case where polling loop starts before bot is ready
+    if channel is None:
+        for attempt in range(50):  # 50 * 0.1s = 5 seconds max wait
+            await asyncio.sleep(0.1)
+            with _discord_channel_lock:
+                channel = _discord_channel
+            if channel is not None:
+                break
+    
+    if channel:
         try:
             if embed:
-                await _discord_channel.send(embed=embed)
+                await channel.send(embed=embed)
+                title = embed.title if hasattr(embed, 'title') and embed.title else 'Notification'
+                print(f"✅ Sent Discord notification: {title}")
             elif content:
-                await _discord_channel.send(content)
+                await channel.send(content)
+                preview = content[:50] + "..." if len(content) > 50 else content
+                print(f"✅ Sent Discord notification: {preview}")
+            return True
         except Exception as e:
             print(f"❌ Failed to send Discord notification: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    else:
+        # Channel still not available - log warning with debug info
+        with _discord_channel_lock:
+            current_value = _discord_channel
+        print(f"⚠️  Discord channel not available yet (bot may still be connecting). Notification will be skipped.")
+        print(f"🔧 DEBUG: Channel value is: {current_value} (type: {type(current_value).__name__})")
+        return False
 
 
 def load_config() -> dict:
@@ -92,113 +132,103 @@ def await_sync(coro):
     return loop.run_until_complete(coro)
 
 
-def is_log_that_command(text: str) -> bool:
+def is_entry_processed(db, lifelog_id: str) -> bool:
     """
-    Detect canonical "Log that" trigger phrase in text.
-    
-    Checks for variants like "log that", "track that", "log this", etc.
-    Case-insensitive matching.
+    Check if a lifelog entry has already been processed.
     
     Args:
-        text: Text to check for trigger phrase
+        db: MongoDB database instance
+        lifelog_id: Lifelog entry ID to check
         
     Returns:
-        True if "log that" variant is detected
+        True if entry has been processed, False otherwise
     """
-    if not text:
-        return False
+    processed_lifelogs = db["processed_lifelogs"]
+    return processed_lifelogs.find_one({"lifelog_id": lifelog_id}) is not None
+
+
+def mark_entry_processed(db, lifelog_id: str, source: str = "limitless"):
+    """
+    Mark a lifelog entry as processed.
     
-    # Pattern matches: log/track + that/this/it
-    pattern = r'\b(log|track)\s+(that|this|it)\b'
-    return bool(re.search(pattern, text, re.IGNORECASE))
+    Args:
+        db: MongoDB database instance
+        lifelog_id: Lifelog entry ID to mark as processed
+        source: Source of the entry (default "limitless")
+    """
+    processed_lifelogs = db["processed_lifelogs"]
+    processed_lifelogs.update_one(
+        {"lifelog_id": lifelog_id},
+        {
+            "$set": {
+                "lifelog_id": lifelog_id,
+                "processed_at": datetime.utcnow(),
+                "source": source
+            }
+        },
+        upsert=True
+    )
 
 
 def polling_loop(limitless_client, registry, db, orchestrator):
     """
-    Poll Limitless API for new lifelogs and dispatch them to modules.
-
+    Poll Limitless API for new "log that" or summary requests using semantic search.
+    
     Each iteration:
-    - Retrieves new entries
-    - Detects "Log that" trigger phrase
-    - Routes to orchestrator for semantic routing
-    - Processes selected modules
-    - Updates last processed time
+    - Searches semantically for "log that" or summary requests (limit 3, newest first)
+    - Checks if entries are already processed (by lifelog_id)
+    - Routes to orchestrator and processes modules
+    - Marks entries as processed after successful handling
     """
-    poll_interval = int(get_env("POLL_INTERVAL", "2"))
+    global _discord_channel, _discord_channel_lock  # Need to access global variable
+    
+    poll_interval = int(get_env("POLL_INTERVAL", "10"))  # Default 10 seconds
     timezone = get_env("TIMEZONE", "America/Los_Angeles")
-
-    print(f"✅ Limitless polling started (every {poll_interval}s, timezone: {timezone})")
-
+    
+    print(f"✅ Limitless polling started (every {poll_interval}s, semantic search, timezone: {timezone})")
+    print("📡 Notifications will be sent when Discord bot is ready (automatic retry)")
+    
     while True:
         try:
-            last_time = get_last_processed_time(db)
-            entries = limitless_client.poll_recent_entries(
-                start_time=last_time, limit=10, timezone=timezone
+            # Search semantically for "log that" or summary requests
+            # API returns entries in descending order (newest first), limit 3
+            entries = limitless_client.search_lifelogs(
+                query="log that or summary request",
+                limit=3,
+                timezone=timezone,
+                direction="desc"
             )
-
+            
             if not entries:
+                # No matching entries - continue polling
+                print(f"🔍 Polling... (no new entries found)")
                 time.sleep(poll_interval)
                 continue
-
-            newest_entry = entries[0]
-            update_last_processed_time(
-                db, newest_entry["endTime"], newest_entry["id"]
-            )
-
-            # Process entries with index tracking for context building
-            for idx, entry in enumerate(entries):
+            
+            print(f"📥 Found {len(entries)} entry/entries from semantic search")
+            
+            # Process each entry
+            for entry in entries:
+                lifelog_id = entry.get("id")
                 markdown = entry.get("markdown", "")
                 
-                # Step 1: Check for "Log that" first to build context before routing
-                if is_log_that_command(markdown):
-                    print(f"🔍 'Log that' detected in entry {entry['id']}")
-                    
-                    # Build context transcript BEFORE routing (so orchestrator has full context)
-                    # Entries are in reverse chronological order (newest first), so we need to reverse
-                    # to get chronological order (oldest to newest) for context
-                    start_idx = max(0, idx - 4)  # Get up to 5 entries (current + 4 preceding)
-                    context_entries = entries[start_idx:idx + 1]
-                    # Reverse to get chronological order (oldest to newest)
-                    context_entries = list(reversed(context_entries))
-                    # Build context transcript by joining markdown entries
-                    context_transcript = "\n\n".join([
-                        e.get("markdown", "") for e in context_entries if e.get("markdown")
-                    ])
-                    
-                    # Step 2: Route via orchestrator WITH context transcript (for better routing decisions)
-                    routing_decision = orchestrator.route_intent(
-                        transcript=context_transcript,  # Pass full context, not just single entry
-                        source="limitless",
-                        context={"lifelog_id": entry["id"]}
-                    )
-                else:
-                    # For non-"Log that" entries, check for summary requests (single entry is fine)
-                    routing_decision = orchestrator.route_intent(
-                        transcript=markdown,
-                        source="limitless",
-                        context={"lifelog_id": entry["id"]}
-                    )
-                    
-                    # Handle summary requests (don't require "Log that")
-                    if routing_decision.get("summary_request"):
-                        target_date = routing_decision.get("summary_date", date.today())
-                        print(f"📊 Summary request detected for {target_date.isoformat()} in entry {entry['id']}")
-                        
-                        # Get summary and send to Discord
-                        from core.discord_bot import get_summary_for_date
-                        summary_embed = await_sync(get_summary_for_date(registry, target_date, channel=None))
-                        
-                        if summary_embed:
-                            await_sync(send_limitless_notification(embed=summary_embed))
-                        continue
-                    
-                    # Skip entries without "Log that" (unless it was a summary request)
+                # Check if already processed
+                if is_entry_processed(db, lifelog_id):
+                    print(f"⏭️  Skipping already-processed entry: {lifelog_id}")
                     continue
                 
-                # Step 4: Handle routing decision
+                print(f"🔍 Processing entry: {lifelog_id}")
+                
+                # Route via orchestrator - pass entry markdown directly (API provides full context)
+                routing_decision = orchestrator.route_intent(
+                    transcript=markdown,
+                    source="limitless",
+                    context={"lifelog_id": lifelog_id}
+                )
+                
+                # Handle routing decision
                 if routing_decision.get("error"):
                     print(f"⚠️  Orchestrator error: {routing_decision['error']}")
-                    # Send error notification to Discord
                     import discord
                     error_embed = discord.Embed(
                         title="❌ Routing Error",
@@ -206,11 +236,26 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                         color=0xFF0000
                     )
                     await_sync(send_limitless_notification(embed=error_embed))
+                    mark_entry_processed(db, lifelog_id)  # Mark as processed even on error
                     continue
                 
+                # Handle summary requests
+                if routing_decision.get("summary_request"):
+                    target_date = routing_decision.get("summary_date", date.today())
+                    print(f"📊 Summary request detected for {target_date.isoformat()}")
+                    
+                    from core.discord_bot import get_summary_for_date
+                    summary_embed = await_sync(get_summary_for_date(registry, target_date, channel=None))
+                    
+                    if summary_embed:
+                        await_sync(send_limitless_notification(embed=summary_embed))
+                    
+                    mark_entry_processed(db, lifelog_id)
+                    continue
+                
+                # Handle out of scope
                 if routing_decision.get("out_of_scope") or not routing_decision.get("modules"):
-                    print(f"ℹ️  Entry {entry['id']} is out of scope or no modules matched")
-                    # Send notification that nothing was logged
+                    print(f"ℹ️  Entry {lifelog_id} is out of scope or no modules matched")
                     import discord
                     info_embed = discord.Embed(
                         title="ℹ️ No Action Taken",
@@ -218,10 +263,11 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                         color=0xFFFF00
                     )
                     await_sync(send_limitless_notification(embed=info_embed))
+                    mark_entry_processed(db, lifelog_id)
                     continue
                 
-                # Step 5: Process each selected module in parallel
-                async def process_module_async(module_decision, context_transcript, entry_id, action):
+                # Process modules in parallel
+                async def process_module_async(module_decision, entry_markdown, entry_id, action):
                     """Process a single module asynchronously"""
                     module_name = module_decision["name"]
                     confidence = module_decision.get("confidence", 0.8)
@@ -237,28 +283,17 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                         print(f"⚠️  Module '{module_name}' not found in registry")
                         return None
                     
-                    # Only process if confidence is high enough
                     if confidence < 0.7:
                         print(f"⚠️  Skipping {module_name} due to low confidence ({confidence:.2f})")
                         return None
                     
                     try:
-                        print(
-                            f"🧩 ROUTING: {module_name} ({action}, confidence: {confidence:.2f}) "
-                            f"for entry {entry_id}"
-                        )
+                        print(f"🧩 ROUTING: {module_name} ({action}, confidence: {confidence:.2f}) for entry {entry_id}")
                         
-                        # Execute appropriate action
                         if action == "log":
-                            result = await module.handle_log(
-                                context_transcript, entry_id, {}
-                            )
+                            result = await module.handle_log(entry_markdown, entry_id, {})
                         elif action == "query":
-                            # For queries, we'd typically need a question, but in "log that" context
-                            # it's usually a log action. Handle as log for now.
-                            result = await module.handle_log(
-                                context_transcript, entry_id, {}
-                            )
+                            result = await module.handle_log(entry_markdown, entry_id, {})
                         else:
                             print(f"⚠️  Unknown action: {action}")
                             return None
@@ -272,44 +307,48 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                         return {"module_name": module_name, "error": str(e)}
                 
                 # Process all modules in parallel
-                if len(routing_decision["modules"]) > 1:
-                    # Multiple modules - process in parallel
+                modules_to_process = routing_decision["modules"]
+                if len(modules_to_process) > 1:
                     tasks = [
                         process_module_async(
-                            module_decision, 
-                            context_transcript, 
-                            entry["id"],
+                            module_decision,
+                            markdown,
+                            lifelog_id,
                             module_decision.get("action", "log")
                         )
-                        for module_decision in routing_decision["modules"]
+                        for module_decision in modules_to_process
                     ]
                     module_results = await_sync(asyncio.gather(*tasks, return_exceptions=True))
                 else:
-                    # Single module - process normally
-                    module_decision = routing_decision["modules"][0]
+                    module_decision = modules_to_process[0]
                     result = await_sync(
                         process_module_async(
                             module_decision,
-                            context_transcript,
-                            entry["id"],
+                            markdown,
+                            lifelog_id,
                             module_decision.get("action", "log")
                         )
                     )
                     module_results = [result] if result else []
                 
-                # Send Discord notifications for all results
+                # Send Discord notifications and mark as processed
+                processed_successfully = False
                 for module_result in module_results:
                     if module_result is None or isinstance(module_result, Exception):
                         continue
                     
                     if module_result.get("error"):
-                        # Error already logged in process_module_async
                         continue
                     
                     result = module_result.get("result")
                     if result and result.get("embed"):
                         await_sync(send_limitless_notification(embed=result["embed"]))
-
+                        processed_successfully = True
+                
+                # Mark as processed after successful handling
+                if processed_successfully:
+                    mark_entry_processed(db, lifelog_id)
+            
             time.sleep(poll_interval)
 
         except KeyboardInterrupt:
