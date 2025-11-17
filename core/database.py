@@ -59,6 +59,11 @@ def init_database(mongodb_url: str = None):
     processed_lifelogs = db["processed_lifelogs"]
     processed_lifelogs.create_index("lifelog_id", unique=True)
     
+    # Initialize vector store collection for RAG
+    rag_chunks = db["rag_chunks"]
+    # Note: Vector search index must be created in MongoDB Atlas UI/API
+    # This collection will store chunked documents with embeddings
+    
     print("✅ Core database initialized")
     return db
 

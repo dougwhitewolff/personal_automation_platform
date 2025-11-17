@@ -88,7 +88,7 @@ Respond with ONLY valid JSON:
         exercise_id = self._store_exercise(exercise, lifelog_id)
         
         # Update training day intensity
-        self._update_training_day(date.today(), exercise, exercise_id)
+        self._update_training_day(self.get_today_in_timezone(), exercise, exercise_id)
         
         # Determine electrolyte recommendation
         # Handle None values from OpenAI (null in JSON becomes None in Python)
@@ -100,33 +100,6 @@ Respond with ONLY valid JSON:
         # Create confirmation embed
         embed = self._create_exercise_embed(exercise, needs_electrolytes)
         return {"embed": embed}
-    
-    async def handle_query(self, query: str, context: Dict) -> str:
-        """Answer workout questions"""
-        from datetime import timedelta
-        
-        exercise_logs_collection = self.db["exercise_logs"]
-        seven_days_ago = (date.today() - timedelta(days=7)).isoformat()
-        
-        exercises_cursor = exercise_logs_collection.find(
-            {"date": {"$gte": seven_days_ago}}
-        ).sort("date", -1)
-        
-        exercises = [
-            {
-                "date": ex.get("date"),
-                "type": ex.get("exercise_type"),
-                "duration": ex.get("duration_minutes"),
-                "calories": ex.get("calories_burned")
-            }
-            for ex in exercises_cursor
-        ]
-        
-        return self.openai_client.answer_query(
-            query=query,
-            context={"recent_exercises": exercises},
-            system_prompt="You are a fitness tracking assistant with access to the user's workout history."
-        )
     
     async def handle_image(self, image_bytes: bytes, context: str) -> Dict:
         """Extract Peloton stats from screenshot"""
@@ -193,7 +166,7 @@ If any field is not visible, use null."""
         
         # Store immediately (auto-confirmed)
         exercise_id = self._store_exercise(exercise_data["exercise"], "peloton_img")
-        self._update_training_day(date.today(), exercise_data["exercise"], exercise_id)
+        self._update_training_day(self.get_today_in_timezone(), exercise_data["exercise"], exercise_id)
         
         # Handle None values from OpenAI (null in JSON becomes None in Python)
         # duration_minutes already extracted above
@@ -235,8 +208,8 @@ If any field is not visible, use null."""
         """Store exercise log and return record ID."""
         exercise_logs_collection = self.db["exercise_logs"]
         peloton = exercise.get("peloton_data", {})
-        today = date.today()
-        now = datetime.now()
+        today = self.get_today_in_timezone()
+        now = self.get_now_in_timezone()
         
         # Handle None values from OpenAI (null in JSON becomes None in Python)
         duration_minutes = exercise.get("duration_minutes") or 0

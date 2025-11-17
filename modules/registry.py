@@ -15,7 +15,7 @@ from datetime import date
 class ModuleRegistry:
     """Central registry for all automation modules"""
     
-    def __init__(self, db, openai_client, limitless_client, config: Dict):
+    def __init__(self, db, openai_client, limitless_client, config: Dict, timezone: str = "America/Los_Angeles"):
         """
         Initialize registry and load modules.
         
@@ -24,11 +24,13 @@ class ModuleRegistry:
             openai_client: OpenAI client instance
             limitless_client: Limitless client instance
             config: Configuration dict from config.yaml
+            timezone: Timezone string (e.g., "America/Los_Angeles") for date calculations
         """
         self.db = db
         self.openai_client = openai_client
         self.limitless_client = limitless_client
         self.config = config
+        self.timezone = timezone
         self.modules = []
         
         self.load_modules()
@@ -62,7 +64,8 @@ class ModuleRegistry:
                     self.db,
                     self.openai_client,
                     self.limitless_client,
-                    module_config
+                    module_config,
+                    timezone=self.timezone
                 )
                 
                 self.modules.append(module)

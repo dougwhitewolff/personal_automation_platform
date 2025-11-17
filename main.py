@@ -239,9 +239,30 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                     mark_entry_processed(db, lifelog_id)  # Mark as processed even on error
                     continue
                 
+                # Handle RAG queries (needs data from records)
+                if routing_decision.get("needs_rag"):
+                    print(f"🔍 RAG query detected for entry {lifelog_id}")
+                    answer = orchestrator.answer_query_with_rag(markdown)
+                    
+                    import discord
+                    answer_embed = discord.Embed(
+                        title="💬 Answer",
+                        description=answer,
+                        color=0x0099ff
+                    )
+                    await_sync(send_limitless_notification(embed=answer_embed))
+                    mark_entry_processed(db, lifelog_id)
+                    continue
+                
                 # Handle summary requests
                 if routing_decision.get("summary_request"):
-                    target_date = routing_decision.get("summary_date", date.today())
+                    # Orchestrator already returns timezone-aware date, but provide fallback
+                    target_date = routing_decision.get("summary_date")
+                    if target_date is None:
+                        # Fallback: get today from registry's timezone
+                        import pytz
+                        tz = pytz.timezone(timezone)
+                        target_date = datetime.now(tz).date()
                     print(f"📊 Summary request detected for {target_date.isoformat()}")
                     
                     from core.discord_bot import get_summary_for_date
@@ -293,7 +314,10 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                         if action == "log":
                             result = await module.handle_log(entry_markdown, entry_id, {})
                         elif action == "query":
-                            result = await module.handle_log(entry_markdown, entry_id, {})
+                            # Queries are now handled by RAG via orchestrator
+                            # This should not be reached if orchestrator is working correctly
+                            print(f"⚠️  Query action detected but should use RAG - skipping module query")
+                            return None
                         else:
                             print(f"⚠️  Unknown action: {action}")
                             return None
@@ -381,7 +405,8 @@ def main():
     openai_client = OpenAIClient(get_env("OPENAI_API_KEY"))
 
     # 5. Initialize module registry
-    registry = ModuleRegistry(db, openai_client, limitless_client, config)
+    timezone = get_env("TIMEZONE", "America/Los_Angeles")
+    registry = ModuleRegistry(db, openai_client, limitless_client, config, timezone=timezone)
 
     print("\nActive Modules:")
     for module in registry.get_all_modules():
@@ -389,21 +414,36 @@ def main():
         print(f"   • {module.get_name()}: {keywords}...")
     print()
 
-    # 6. Initialize automation orchestrator
-    orchestrator = AutomationOrchestrator(openai_client, registry)
+    # 6. Initialize RAG service
+    rag_service = None
+    try:
+        from core.rag_service import RAGService
+        rag_service = RAGService(
+            db=db,
+            openai_api_key=get_env("OPENAI_API_KEY"),
+            collection_name="rag_chunks",
+            index_name="vector_index"
+        )
+        print("✅ RAG Service initialized")
+    except Exception as e:
+        print(f"⚠️  RAG Service initialization failed: {e}")
+        print("   Queries requiring data will not be available.")
+    
+    # 7. Initialize automation orchestrator
+    orchestrator = AutomationOrchestrator(openai_client, registry, rag_service=rag_service, timezone=timezone)
     print("✅ Automation Orchestrator initialized")
 
-    # 7. Start scheduler
+    # 8. Start scheduler
     scheduler = Scheduler(get_env("TIMEZONE", "America/Los_Angeles"))
     scheduler.load_from_registry(registry)
     threading.Thread(target=scheduler.run, daemon=True).start()
 
-    # 8. Start Limitless polling
+    # 9. Start Limitless polling
     threading.Thread(
         target=polling_loop, args=(limitless_client, registry, db, orchestrator), daemon=True
     ).start()
 
-    # 9. Setup and run Discord bot (lazy import)
+    # 10. Setup and run Discord bot (lazy import)
     print("✅ Platform initialized — starting Discord bot...\n")
     print("=" * 60)
     print("  Platform is live!")

@@ -13,6 +13,7 @@ from discord.ext import commands
 from typing import Dict, Callable, Optional
 import asyncio
 from datetime import date, datetime, timedelta
+import pytz
 
 
 async def get_summary_for_date(registry, target_date: date, channel=None):
@@ -179,9 +180,19 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
                 
                 # Check for summary request
                 if routing_decision.get("summary_request"):
-                    target_date = routing_decision.get("summary_date", date.today())
+                    # Use orchestrator's parsed date, or fallback to today in configured timezone
+                    target_date = routing_decision.get("summary_date")
+                    if target_date is None:
+                        target_date = get_today_in_timezone()
                     async with message.channel.typing():
                         await get_summary_for_date(registry, target_date, message.channel)
+                    return
+                
+                # Check for RAG query (needs data from records)
+                if routing_decision.get("needs_rag"):
+                    async with message.channel.typing():
+                        answer = orchestrator.answer_query_with_rag(content)
+                        await message.channel.send(answer)
                     return
                 
                 # Check for direct answer (in-scope but no module routing)
@@ -230,10 +241,10 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
                     
                     try:
                         if action == "query":
-                            # Handle as question
-                            print(f"🧠 Routing query to {module_name} (confidence: {confidence:.2f})")
-                            answer = await module.handle_query(content, {})
-                            return {"type": "query", "module_name": module_name, "answer": answer}
+                            # Queries are now handled by RAG via orchestrator
+                            # This should not be reached if orchestrator is working correctly
+                            print(f"⚠️  Query action detected but should use RAG - skipping module query")
+                            return None
                         
                         elif action == "log":
                             # Handle as log command
@@ -502,6 +513,13 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
             await reaction.message.channel.send("❌ Cancelled.")
             del pending_confirmations[message_id]
     
+    # Helper function to get today in registry's timezone
+    def get_today_in_timezone():
+        """Get today's date in the registry's configured timezone."""
+        tz = pytz.timezone(registry.timezone)
+        now_tz = datetime.now(tz)
+        return now_tz.date()
+    
     # Commands
     @bot.command(name='summary')
     async def daily_summary(ctx, date_str: str = None):
@@ -515,14 +533,17 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
         """
         from datetime import date, datetime, timedelta
         
+        # Get today in configured timezone
+        today = get_today_in_timezone()
+        
         # Parse date if provided
         if date_str:
             date_str_lower = date_str.lower().strip()
             try:
                 if date_str_lower == "yesterday":
-                    target_date = date.today() - timedelta(days=1)
+                    target_date = today - timedelta(days=1)
                 elif date_str_lower == "today":
-                    target_date = date.today()
+                    target_date = today
                 else:
                     # Try parsing various date formats
                     try:
@@ -536,7 +557,7 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
                 await ctx.send("❌ Invalid date format. Use YYYY-MM-DD, 'today', or 'yesterday'")
                 return
         else:
-            target_date = date.today()
+            target_date = today
         
         async with ctx.channel.typing():
             await get_summary_for_date(registry, target_date, ctx.channel)

@@ -6,7 +6,9 @@ All modules must inherit from BaseModule and implement its abstract methods.
 
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
+from datetime import date, datetime
 import re
+import pytz
 
 
 class BaseModule(ABC):
@@ -15,16 +17,17 @@ class BaseModule(ABC):
     
     Modules are self-contained units that handle:
     - Keyword detection ("log that", "track this")
-    - Question pattern matching ("how much protein?")
     - Data logging and storage
-    - Question answering
     - Image processing
     - Scheduled tasks
+    
+    Note: Question answering is now handled by the RAG service via the orchestrator.
+    Modules focus solely on data ingestion and storage.
     
     Each module maintains its own database collections and logic.
     """
     
-    def __init__(self, db, openai_client, limitless_client, config=None):
+    def __init__(self, db, openai_client, limitless_client, config=None, timezone: str = "America/Los_Angeles"):
         """
         Initialize module.
         
@@ -33,11 +36,13 @@ class BaseModule(ABC):
             openai_client: OpenAI client instance
             limitless_client: Limitless API client instance
             config: Module-specific configuration from config.yaml
+            timezone: Timezone string (e.g., "America/Los_Angeles") for date calculations
         """
         self.db = db
         self.openai_client = openai_client
         self.limitless_client = limitless_client
         self.config = config or {}
+        self.timezone = pytz.timezone(timezone)
         
         # Setup database collections
         self.setup_database()
@@ -102,20 +107,6 @@ class BaseModule(ABC):
         pass
     
     @abstractmethod
-    async def handle_query(self, query: str, context: Dict) -> str:
-        """
-        Answer a question about module data.
-        
-        Args:
-            query: User's question
-            context: Additional context (lifelogs, etc.)
-            
-        Returns:
-            Natural language answer
-        """
-        pass
-    
-    @abstractmethod
     async def handle_image(self, image_bytes: bytes, context: str) -> Dict:
         """
         Process an uploaded image.
@@ -158,6 +149,25 @@ class BaseModule(ABC):
         pass
     
     # Helper methods (don't need to override)
+    
+    def get_today_in_timezone(self) -> date:
+        """
+        Get today's date in the configured timezone.
+        
+        Returns:
+            date object representing today in the configured timezone
+        """
+        now_tz = datetime.now(self.timezone)
+        return now_tz.date()
+    
+    def get_now_in_timezone(self) -> datetime:
+        """
+        Get current datetime in the configured timezone.
+        
+        Returns:
+            datetime object representing now in the configured timezone
+        """
+        return datetime.now(self.timezone)
     
     def matches_keyword(self, text: str) -> bool:
         """

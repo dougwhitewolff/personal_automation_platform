@@ -12,6 +12,7 @@ import yaml
 import os
 import re
 from datetime import date, datetime, timedelta
+import pytz
 
 
 class AutomationOrchestrator:
@@ -22,19 +23,33 @@ class AutomationOrchestrator:
     AI-based classification instead of keyword matching.
     """
     
-    def __init__(self, openai_client, registry, scope_config_path: str = "scope.yaml"):
+    def __init__(self, openai_client, registry, rag_service=None, scope_config_path: str = "scope.yaml", timezone: str = "America/Los_Angeles"):
         """
         Initialize orchestrator.
         
         Args:
             openai_client: OpenAIClient instance
             registry: ModuleRegistry instance
+            rag_service: Optional RAGService instance for answering queries
             scope_config_path: Path to scope configuration file
+            timezone: Timezone string (e.g., "America/Los_Angeles") for date calculations
         """
         self.openai_client = openai_client
         self.registry = registry
+        self.rag_service = rag_service
         self._module_tools_cache = None
         self.scope_config = self._load_scope_config(scope_config_path)
+        self.timezone = pytz.timezone(timezone)
+    
+    def _get_today_in_timezone(self) -> date:
+        """
+        Get today's date in the configured timezone.
+        
+        Returns:
+            date object representing today in the configured timezone
+        """
+        now_tz = datetime.now(self.timezone)
+        return now_tz.date()
     
     def _parse_date_from_text(self, text: str) -> Optional[date]:
         """
@@ -51,32 +66,35 @@ class AutomationOrchestrator:
             
         text_lower = text.lower().strip()
         
+        # Get today in configured timezone
+        today = self._get_today_in_timezone()
+        
         # Check for relative dates
         if 'yesterday' in text_lower:
-            return date.today() - timedelta(days=1)
+            return today - timedelta(days=1)
         elif 'today' in text_lower:
-            return date.today()
+            return today
         elif 'tomorrow' in text_lower:
-            return date.today() + timedelta(days=1)
+            return today + timedelta(days=1)
         
         # Check for "X days ago"
         days_ago_match = re.search(r'(\d+)\s+days?\s+ago', text_lower)
         if days_ago_match:
             days = int(days_ago_match.group(1))
-            return date.today() - timedelta(days=days)
+            return today - timedelta(days=days)
         
         # Check for "last week", "last month", etc.
         if 'last week' in text_lower:
-            return date.today() - timedelta(days=7)
+            return today - timedelta(days=7)
         elif 'last month' in text_lower:
             # Approximate: 30 days ago
-            return date.today() - timedelta(days=30)
+            return today - timedelta(days=30)
         
         # Check for "X weeks ago", "X months ago"
         weeks_ago_match = re.search(r'(\d+)\s+weeks?\s+ago', text_lower)
         if weeks_ago_match:
             weeks = int(weeks_ago_match.group(1))
-            return date.today() - timedelta(days=weeks * 7)
+            return today - timedelta(days=weeks * 7)
         
         # Check for date patterns
         # YYYY-MM-DD
@@ -116,11 +134,12 @@ class AutomationOrchestrator:
             month = month_map.get(month_str)
             if month:
                 try:
-                    # Use current year, or previous year if the date hasn't occurred yet this year
-                    year = date.today().year
+                    # Use current year in configured timezone, or previous year if the date hasn't occurred yet
+                    today = self._get_today_in_timezone()
+                    year = today.year
                     parsed_date = date(year, month, day)
-                    # If the date is in the future, use previous year
-                    if parsed_date > date.today():
+                    # If the date is in the future (in configured timezone), use previous year
+                    if parsed_date > today:
                         parsed_date = date(year - 1, month, day)
                     return parsed_date
                 except ValueError:
@@ -178,6 +197,7 @@ class AutomationOrchestrator:
                 "summary_date": None,
                 "out_of_scope": True,
                 "direct_answer": None,
+                "needs_rag": False,
                 "reasoning": "Empty transcript",
                 "error": None
             }
@@ -186,7 +206,7 @@ class AutomationOrchestrator:
         if self._is_summary_request(transcript):
             target_date = self._parse_date_from_text(transcript)
             if target_date is None:
-                target_date = date.today()  # Default to today
+                target_date = self._get_today_in_timezone()  # Default to today in configured timezone
             
             return {
                 "modules": [],
@@ -194,6 +214,7 @@ class AutomationOrchestrator:
                 "summary_date": target_date,
                 "out_of_scope": False,
                 "direct_answer": None,
+                "needs_rag": False,
                 "reasoning": f"Summary request detected for {target_date.isoformat()}",
                 "error": None
             }
@@ -208,6 +229,7 @@ class AutomationOrchestrator:
                 "summary_date": None,
                 "out_of_scope": False,
                 "direct_answer": None,
+                "needs_rag": False,
                 "reasoning": "No modules available",
                 "error": "No modules loaded in registry"
             }
@@ -381,7 +403,8 @@ class AutomationOrchestrator:
                 "The message could be a question, a command to log data, a request for a summary, or a general query. "
                 "If the user is asking for a summary, overview, or wants to see what they did on a particular day, "
                 "use the 'get_daily_summary' function. "
-                "Use 'log' action for logging/recording data, 'query' action for questions. "
+                "Use 'log' action for logging/recording data. "
+                "For questions that need data/records to answer, use 'query' action. "
                 "You can select multiple modules if the request spans multiple domains. "
                 "Only select modules if you are confident (>= 0.7) they should handle the request. "
                 "If the request is completely out of scope (e.g., asking about weather, news, etc.), "
@@ -410,11 +433,39 @@ class AutomationOrchestrator:
             # tool_calls can be None or an empty list
             tool_calls = getattr(message, 'tool_calls', None)
             if not tool_calls or len(tool_calls) == 0:
-                # No tools called - check if it's in-scope for direct answering
+                # No tools called - determine if it's a query needing data or general question
                 scope_check = self._check_scope(transcript)
                 
-                if scope_check["in_scope"] and self.scope_config.get("scope_config", {}).get("allow_direct_answers", True):
-                    # In-scope but no module routing - generate direct answer
+                if not scope_check["in_scope"]:
+                    # Out of scope
+                    return {
+                        "modules": [],
+                        "summary_request": False,
+                        "summary_date": None,
+                        "out_of_scope": True,
+                        "direct_answer": None,
+                        "needs_rag": False,
+                        "reasoning": scope_check.get("reasoning") or getattr(message, 'content', None) or "No relevant modules found for this request",
+                        "error": None
+                    }
+                
+                # Check if query needs data (RAG) or can be answered directly
+                needs_data = self._query_needs_data(transcript)
+                
+                if needs_data and self.rag_service:
+                    # Query needs data - use RAG
+                    return {
+                        "modules": [],
+                        "summary_request": False,
+                        "summary_date": None,
+                        "out_of_scope": False,
+                        "direct_answer": None,
+                        "needs_rag": True,
+                        "reasoning": "Query requires data from records",
+                        "error": None
+                    }
+                elif self.scope_config.get("scope_config", {}).get("allow_direct_answers", True):
+                    # General question - direct answer
                     direct_answer = self._generate_direct_answer(transcript, source)
                     return {
                         "modules": [],
@@ -422,18 +473,20 @@ class AutomationOrchestrator:
                         "summary_date": None,
                         "out_of_scope": False,
                         "direct_answer": direct_answer,
-                        "reasoning": f"In-scope query: {scope_check['reasoning']}",
+                        "needs_rag": False,
+                        "reasoning": f"In-scope general query: {scope_check['reasoning']}",
                         "error": None
                     }
                 else:
-                    # Out of scope - model decided not to call any tools
+                    # In-scope but can't answer
                     return {
                         "modules": [],
                         "summary_request": False,
                         "summary_date": None,
-                        "out_of_scope": True,
+                        "out_of_scope": False,
                         "direct_answer": None,
-                        "reasoning": scope_check.get("reasoning") or getattr(message, 'content', None) or "No relevant modules found for this request",
+                        "needs_rag": False,
+                        "reasoning": "Query in scope but cannot be answered",
                         "error": None
                     }
             
@@ -456,7 +509,7 @@ class AutomationOrchestrator:
                         # Try parsing the date_str directly as it might be a date format
                         summary_date = self._parse_date_from_text(f" {date_str} ")
                         if summary_date is None:
-                            summary_date = date.today()  # Default to today
+                            summary_date = self._get_today_in_timezone()  # Default to today in configured timezone
                     continue
                 
                 # Extract module name from function name (e.g., "nutrition_module" -> "nutrition")
@@ -477,6 +530,7 @@ class AutomationOrchestrator:
                     "summary_date": summary_date,
                     "out_of_scope": False,
                     "direct_answer": None,
+                    "needs_rag": False,
                     "reasoning": f"Summary request detected for {summary_date.isoformat()}",
                     "error": None
                 }
@@ -486,12 +540,16 @@ class AutomationOrchestrator:
             max_confidence = max([m["confidence"] for m in modules]) if modules else 0
             out_of_scope = max_confidence < 0.7
             
+            # Check if any modules have "query" action - these should use RAG instead
+            has_query_action = any(m.get("action") == "query" for m in modules)
+            
             return {
                 "modules": modules,
                 "summary_request": False,
                 "summary_date": None,
                 "out_of_scope": out_of_scope,
                 "direct_answer": None,
+                "needs_rag": has_query_action and self.rag_service is not None,
                 "reasoning": f"Selected {len(modules)} module(s) with max confidence {max_confidence:.2f}",
                 "error": None
             }
@@ -503,6 +561,7 @@ class AutomationOrchestrator:
                 "summary_date": None,
                 "out_of_scope": False,
                 "direct_answer": None,
+                "needs_rag": False,
                 "reasoning": "Failed to parse tool call arguments",
                 "error": f"JSON decode error: {str(e)}"
             }
@@ -513,6 +572,7 @@ class AutomationOrchestrator:
                 "summary_date": None,
                 "out_of_scope": False,
                 "direct_answer": None,
+                "needs_rag": False,
                 "reasoning": "Error during intent classification",
                 "error": str(e)
             }
@@ -548,6 +608,7 @@ class AutomationOrchestrator:
             "summary_date": None,
             "out_of_scope": len(modules) == 0,
             "direct_answer": None,
+            "needs_rag": any(m.get("action") == "query" for m in modules) and self.rag_service is not None,
             "reasoning": "Fallback keyword matching",
             "error": None
         }
@@ -692,6 +753,54 @@ class AutomationOrchestrator:
             return (response.choices[0].message.content or "").strip()
         except Exception as e:
             return f"I encountered an error while generating a response: {str(e)}"
+    
+    def _query_needs_data(self, transcript: str) -> bool:
+        """
+        Determine if a query needs data from records to answer.
+        
+        Args:
+            transcript: User's query/question
+            
+        Returns:
+            True if query likely needs data from records
+        """
+        transcript_lower = transcript.lower()
+        
+        # Keywords that indicate the query needs data
+        data_keywords = [
+            "my", "i", "me", "today", "yesterday", "this week", "last week",
+            "how much", "how many", "what did", "when did", "did i",
+            "have i", "show me", "tell me about", "what is my", "what was my",
+            "calories", "protein", "workout", "exercise", "food", "meal",
+            "sleep", "weight", "hydration", "water", "mood", "energy",
+            "summary", "stats", "progress", "total", "average"
+        ]
+        
+        # Check if query contains data-related keywords
+        has_data_keywords = any(keyword in transcript_lower for keyword in data_keywords)
+        
+        # Check if it's a question (starts with question words)
+        is_question = any(transcript_lower.strip().startswith(q) for q in [
+            "how", "what", "when", "where", "who", "why", "did", "have", "has",
+            "was", "were", "is", "are", "can", "could", "would", "should"
+        ])
+        
+        return has_data_keywords and is_question
+    
+    def answer_query_with_rag(self, query: str) -> str:
+        """
+        Answer a query using RAG service.
+        
+        Args:
+            query: User's question
+            
+        Returns:
+            Answer string
+        """
+        if not self.rag_service:
+            return "RAG service is not available. Please check configuration."
+        
+        return self.rag_service.answer_query(query)
     
     def invalidate_cache(self):
         """Invalidate module tools cache (call when modules are added/removed)."""

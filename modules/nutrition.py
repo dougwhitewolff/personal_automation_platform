@@ -107,7 +107,7 @@ class NutritionModule(BaseModule):
                             "fat_g": food['fat_g'],
                             "fiber_g": food.get('fiber_g', 0),
                             "notes": food.get('notes', ''),
-                            "created_at": datetime.now()
+                            "created_at": self.get_now_in_timezone()
                         }
                     },
                     upsert=True
@@ -148,47 +148,13 @@ class NutritionModule(BaseModule):
         self._store_wellness(analysis.get('wellness', {}), lifelog_id)
         
         # Get updated summary
-        summary = self._get_daily_summary_internal(date.today())
+        summary = self._get_daily_summary_internal(self.get_today_in_timezone())
         
         # Create confirmation embed
         embed = self._create_log_confirmation_embed(summary)
         
         return {'embed': embed}
     
-    async def handle_query(self, query: str, context: Dict) -> str:
-        """Answer nutrition questions"""
-
-        # Diagnostic print – confirm that this function is being called
-        print(f"🧩 Nutrition.handle_query() triggered with query: {query!r}")
-
-        # Get relevant data from MongoDB (no need for raw transcripts)
-        today_summary = self._get_daily_summary_internal(date.today())
-
-        context_data = {
-            'today_summary': today_summary
-        }
-
-        # Make the OpenAI call
-        try:
-            answer = self.openai_client.answer_query(
-                query=query,
-                context=context_data,
-                system_prompt=(
-                    "You are a nutrition and wellness assistant with access to the "
-                    "user's food logs, health data, and daily activities."
-                )
-            )
-            # Diagnostic print – confirm what was returned
-            print(f"🧩 Nutrition.handle_query() returning: {answer!r}")
-            return answer
-
-        except Exception as e:
-            print(f"❌ Nutrition.handle_query() error: {e}")
-            return f"Error while processing your nutrition query: {e}"
-
-        print(f"🧠 OpenAI answer: {answer}")
-        return answer
-
     async def handle_image(self, image_bytes: bytes, context: str) -> Dict:
         """Analyze food plate images"""
         
@@ -338,8 +304,8 @@ Respond with ONLY valid JSON:
             return
         
         food_logs_collection = self.db["food_logs"]
-        today = date.today()
-        now = datetime.now()
+        today = self.get_today_in_timezone()
+        now = self.get_now_in_timezone()
         
         documents = []
         for food in foods:
@@ -367,8 +333,8 @@ Respond with ONLY valid JSON:
             return
         
         hydration_logs_collection = self.db["hydration_logs"]
-        today = date.today()
-        now = datetime.now()
+        today = self.get_today_in_timezone()
+        now = self.get_now_in_timezone()
         
         documents = []
         for entry in hydration.get('entries', []):
@@ -389,7 +355,8 @@ Respond with ONLY valid JSON:
             return
         
         sleep_logs_collection = self.db["sleep_logs"]
-        today = date.today()
+        today = self.get_today_in_timezone()
+        now = self.get_now_in_timezone()
         
         sleep_logs_collection.update_one(
             {"date": today.isoformat()},
@@ -400,7 +367,7 @@ Respond with ONLY valid JSON:
                     "sleep_score": sleep.get('sleep_score'),
                     "quality_notes": sleep.get('quality'),
                     "lifelog_id": lifelog_id,
-                    "created_at": datetime.now()
+                    "created_at": now
                 }
             },
             upsert=True
@@ -412,7 +379,8 @@ Respond with ONLY valid JSON:
             return
         
         daily_health_collection = self.db["daily_health"]
-        today = date.today()
+        today = self.get_today_in_timezone()
+        now = self.get_now_in_timezone()
         
         # Get existing document if it exists
         existing = daily_health_collection.find_one({"date": today.isoformat()})
@@ -420,7 +388,7 @@ Respond with ONLY valid JSON:
         update_data = {
             "date": today.isoformat(),
             "lifelog_id": lifelog_id,
-            "created_at": datetime.now()
+            "created_at": now
         }
         
         # Update weight if provided
@@ -457,8 +425,8 @@ Respond with ONLY valid JSON:
             return
         
         wellness_scores_collection = self.db["wellness_scores"]
-        today = date.today()
-        now = datetime.now()
+        today = self.get_today_in_timezone()
+        now = self.get_now_in_timezone()
         
         wellness_scores_collection.insert_one({
             "date": today.isoformat(),
@@ -668,7 +636,7 @@ Respond with ONLY valid JSON:
             inline=True
         )
         
-        embed.set_footer(text=f"Last updated: {datetime.now().strftime('%I:%M %p')}")
+        embed.set_footer(text=f"Last updated: {self.get_now_in_timezone().strftime('%I:%M %p')}")
         
         return embed
     
