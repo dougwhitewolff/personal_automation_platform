@@ -33,6 +33,10 @@ from modules import ModuleRegistry
 _discord_channel = None
 _discord_channel_lock = threading.Lock()
 
+# Global reference to Discord bot's event loop (for thread-safe notifications)
+_discord_bot_loop = None
+_discord_bot_loop_lock = threading.Lock()
+
 def set_discord_channel(channel):
     """Set the Discord channel for Limitless notifications"""
     global _discord_channel
@@ -40,15 +44,17 @@ def set_discord_channel(channel):
         _discord_channel = channel
         print(f'🔧 DEBUG: Channel set in set_discord_channel: {_discord_channel is not None}')
 
-async def send_limitless_notification(embed=None, content=None):
+def set_discord_bot_loop(loop):
+    """Set the Discord bot's event loop for thread-safe notifications"""
+    global _discord_bot_loop
+    with _discord_bot_loop_lock:
+        _discord_bot_loop = loop
+        print(f'🔧 DEBUG: Bot event loop registered: {_discord_bot_loop is not None}')
+
+async def _send_notification_async(embed=None, content=None):
     """
-    Send notification from Limitless polling loop via Discord bot.
-    
-    Automatically retries if channel isn't ready yet (bot may still be connecting).
-    This function handles the async nature of bot initialization gracefully.
-    
-    Returns:
-        bool: True if notification was sent successfully, False otherwise
+    Internal async function to send notification.
+    This runs in the bot's event loop.
     """
     global _discord_channel, _discord_channel_lock
     
@@ -58,7 +64,6 @@ async def send_limitless_notification(embed=None, content=None):
         channel = _discord_channel
     
     # If channel not set, wait up to 5 seconds for bot to connect
-    # This handles the case where polling loop starts before bot is ready
     if channel is None:
         for attempt in range(50):  # 50 * 0.1s = 5 seconds max wait
             await asyncio.sleep(0.1)
@@ -84,12 +89,65 @@ async def send_limitless_notification(embed=None, content=None):
             traceback.print_exc()
             return False
     else:
-        # Channel still not available - log warning with debug info
+        # Channel still not available
         with _discord_channel_lock:
             current_value = _discord_channel
         print(f"⚠️  Discord channel not available yet (bot may still be connecting). Notification will be skipped.")
         print(f"🔧 DEBUG: Channel value is: {current_value} (type: {type(current_value).__name__})")
         return False
+
+def send_limitless_notification(embed=None, content=None):
+    """
+    Send notification from Limitless polling loop via Discord bot.
+    
+    This function can be called from any thread. It automatically detects if it's
+    being called from the bot's event loop or from another thread (like the polling loop),
+    and handles it appropriately.
+    
+    Returns:
+        bool: True if notification was sent successfully, False otherwise
+    """
+    global _discord_bot_loop, _discord_bot_loop_lock
+    
+    # Check if we're in the bot's event loop
+    try:
+        current_loop = asyncio.get_running_loop()
+        with _discord_bot_loop_lock:
+            bot_loop = _discord_bot_loop
+        
+        # If we're in the bot's loop, we can await directly
+        if bot_loop and current_loop is bot_loop:
+            # We're in the bot's event loop - use await directly
+            # But this function is sync, so we need to handle it differently
+            # Actually, if we're in an async context in the bot's loop, we should use the async version
+            # For now, let's use the thread-safe method for consistency
+            pass
+    except RuntimeError:
+        # No running loop - we're in a sync context
+        pass
+    
+    # Get the bot's event loop
+    with _discord_bot_loop_lock:
+        bot_loop = _discord_bot_loop
+    
+    if bot_loop:
+        # Schedule the coroutine on the bot's event loop from this thread
+        future = asyncio.run_coroutine_threadsafe(
+            _send_notification_async(embed=embed, content=content),
+            bot_loop
+        )
+        try:
+            # Wait for the result (with timeout)
+            return future.result(timeout=10.0)
+        except Exception as e:
+            print(f"❌ Failed to send Discord notification (thread-safe): {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    else:
+        # Bot loop not available yet - try using await_sync as fallback
+        print("⚠️  Bot event loop not available, using fallback method")
+        return await_sync(_send_notification_async(embed=embed, content=content))
 
 
 def load_config() -> dict:
@@ -250,7 +308,7 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                         description=answer,
                         color=0x0099ff
                     )
-                    await_sync(send_limitless_notification(embed=answer_embed))
+                    send_limitless_notification(embed=answer_embed)
                     mark_entry_processed(db, lifelog_id)
                     continue
                 
@@ -269,7 +327,7 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                     summary_embed = await_sync(get_summary_for_date(registry, target_date, channel=None))
                     
                     if summary_embed:
-                        await_sync(send_limitless_notification(embed=summary_embed))
+                        send_limitless_notification(embed=summary_embed)
                     
                     mark_entry_processed(db, lifelog_id)
                     continue
@@ -283,7 +341,7 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                         description=f"Entry detected but no matching modules found.\n\nReasoning: {routing_decision.get('reasoning', 'Unknown')}",
                         color=0xFFFF00
                     )
-                    await_sync(send_limitless_notification(embed=info_embed))
+                    send_limitless_notification(embed=info_embed)
                     mark_entry_processed(db, lifelog_id)
                     continue
                 
@@ -366,7 +424,7 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                     
                     result = module_result.get("result")
                     if result and result.get("embed"):
-                        await_sync(send_limitless_notification(embed=result["embed"]))
+                        send_limitless_notification(embed=result["embed"])
                         processed_successfully = True
                 
                 # Mark as processed after successful handling

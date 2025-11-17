@@ -107,13 +107,18 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
     async def on_ready():
         print(f'✅ Discord bot connected as {bot.user}')
         # Set channel for Limitless notifications
-        from main import set_discord_channel
+        from main import set_discord_channel, set_discord_bot_loop
         channel = bot.get_channel(channel_id)
         if channel:
             set_discord_channel(channel)
             print(f'✅ Discord channel set for Limitless notifications')
-            
-            # Send online message to channel
+        
+        # Store the bot's event loop for thread-safe notifications
+        set_discord_bot_loop(bot.loop)
+        print(f'✅ Discord bot event loop registered for thread-safe notifications')
+        
+        # Send online message to channel
+        if channel:
             try:
                 embed = discord.Embed(
                     title="🤖 Bot Online",
