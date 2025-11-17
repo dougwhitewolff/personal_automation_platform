@@ -120,11 +120,17 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
         # Send online message to channel
         if channel:
             try:
+                # Use configured timezone for timestamp
+                # Get UTC time first, then convert to configured timezone
+                from datetime import timezone as tz_utc
+                tz = pytz.timezone(registry.timezone)
+                utc_now = datetime.now(tz_utc.utc)
+                configured_time = utc_now.astimezone(tz)
                 embed = discord.Embed(
                     title="🤖 Bot Online",
                     description="Personal Automation Platform is now online and ready!",
                     color=0x00ff00,
-                    timestamp=datetime.utcnow()
+                    timestamp=configured_time
                 )
                 embed.add_field(
                     name="Status",
