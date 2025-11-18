@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 from datetime import date, datetime
 import re
 import pytz
+from utils.logger import get_logger
 
 
 class BaseModule(ABC):
@@ -27,7 +28,7 @@ class BaseModule(ABC):
     Each module maintains its own database collections and logic.
     """
     
-    def __init__(self, db, openai_client, limitless_client, config=None, timezone: str = "America/Los_Angeles"):
+    def __init__(self, db, openai_client, limitless_client, config=None, timezone: str = "America/Los_Angeles", rag_service=None):
         """
         Initialize module.
         
@@ -37,15 +38,24 @@ class BaseModule(ABC):
             limitless_client: Limitless API client instance
             config: Module-specific configuration from config.yaml
             timezone: Timezone string (e.g., "America/Los_Angeles") for date calculations
+            rag_service: Optional RAGService instance for automatic vectorization
         """
         self.db = db
         self.openai_client = openai_client
         self.limitless_client = limitless_client
         self.config = config or {}
         self.timezone = pytz.timezone(timezone)
+        self.rag_service = rag_service
         
         # Setup database collections
         self.setup_database()
+        
+        # Initialize logger after setup (so we can use get_name() if needed)
+        try:
+            module_name = self.get_name()
+        except:
+            module_name = self.__class__.__name__.lower()
+        self.logger = get_logger(f"module.{module_name}")
     
     @abstractmethod
     def get_name(self) -> str:
@@ -188,7 +198,44 @@ class BaseModule(ABC):
         """Return True if text matches any question pattern (case-insensitive)."""
         for pattern in self.get_question_patterns():
             if re.search(pattern, text, re.IGNORECASE):
-                print(f"🔍 Regex matched pattern: {pattern!r} in text: {repr(text)}")
+                self.logger.debug(f"Regex matched pattern: {pattern!r} in text: {repr(text[:100])}")
                 return True
-        print(f"🚫 No regex match for text: {repr(text)}")
+        self.logger.debug(f"No regex match for text: {repr(text[:100])}")
         return False
+    
+    def _vectorize_record(self, record: Dict, collection_name: str, delete_existing: bool = False) -> bool:
+        """
+        Helper method to vectorize a record after storing it.
+        
+        Args:
+            record: MongoDB document that was just stored
+            collection_name: Name of the collection the record belongs to
+            delete_existing: If True, delete existing vectors for this record first (for upserts)
+            
+        Returns:
+            True if vectorization succeeded, False otherwise
+        """
+        if not self.rag_service:
+            self.logger.debug(f"RAG service not available, skipping vectorization for {collection_name}")
+            return False
+        
+        try:
+            record_id = str(record.get("_id", "unknown"))
+            
+            # For upsert operations, delete existing vectors first to avoid duplicates
+            if delete_existing and record.get("_id"):
+                source_id = str(record["_id"])
+                self.logger.debug(f"Deleting existing vectors for {collection_name} record {source_id}")
+                self.rag_service.delete_documents_by_source_id(source_id, collection_name)
+            
+            self.logger.info(f"Vectorizing {collection_name} record {record_id}")
+            result = self.rag_service.vectorize_record(record, collection_name)
+            if result:
+                self.logger.info(f"✓ Successfully vectorized {collection_name} record {record_id}")
+            else:
+                self.logger.warning(f"Vectorization returned False for {collection_name} record {record_id}")
+            return result
+        except Exception as e:
+            # Don't fail logging if vectorization fails
+            self.logger.error(f"Failed to vectorize record from {collection_name}: {e}", exc_info=True)
+            return False

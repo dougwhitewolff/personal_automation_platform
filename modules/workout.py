@@ -52,6 +52,8 @@ class WorkoutModule(BaseModule):
     async def handle_log(self, message_content: str, lifelog_id: str, analysis: Dict) -> Dict:
         """Process workout logging"""
         
+        self.logger.info(f"Processing workout log for lifelog_id: {lifelog_id}")
+        
         # message_content now contains the context transcript (last 5 entries from polling batch)
         # No need to fetch full day's transcript
         
@@ -73,6 +75,7 @@ Respond with ONLY valid JSON:
 }}"""
         
         # Perform OpenAI text analysis
+        self.logger.debug(f"Analyzing transcript with OpenAI (length: {len(message_content)} chars)")
         analysis = self.openai_client.analyze_text(
             transcript=message_content,
             module_name=self.get_name(),
@@ -81,10 +84,16 @@ Respond with ONLY valid JSON:
         
         # Handle invalid or missing detection
         if "error" in analysis or not analysis.get("exercise", {}).get("detected"):
+            self.logger.warning("No exercise detected in transcript")
             return {"embed": self._create_error_embed("No exercise detected")}
         
         # Store exercise data
         exercise = analysis["exercise"]
+        exercise_type = exercise.get("type", "unknown")
+        duration = exercise.get("duration_minutes") or 0
+        calories = exercise.get("calories_burned")
+        self.logger.info(f"Detected exercise: {exercise_type}, {duration} min, {calories} cal")
+        
         exercise_id = self._store_exercise(exercise, lifelog_id)
         
         # Update training day intensity
@@ -97,8 +106,12 @@ Respond with ONLY valid JSON:
             duration_minutes >= self.config.get("electrolyte_threshold_minutes", 45)
         )
         
+        if needs_electrolytes:
+            self.logger.info("Electrolyte recommendation: Yes (45+ min cardio)")
+        
         # Create confirmation embed
         embed = self._create_exercise_embed(exercise, needs_electrolytes)
+        self.logger.info(f"✓ Successfully processed workout log for lifelog_id: {lifelog_id}")
         return {"embed": embed}
     
     async def handle_image(self, image_bytes: bytes, context: str) -> Dict:
@@ -206,6 +219,10 @@ If any field is not visible, use null."""
     # ---------------------------------------------------------------------
     def _store_exercise(self, exercise: Dict, lifelog_id: str) -> str:
         """Store exercise log and return record ID."""
+        self.logger.info(f"Storing exercise: {exercise.get('type')}, "
+                        f"{exercise.get('duration_minutes') or 0} min, "
+                        f"{exercise.get('calories_burned')} cal")
+        
         exercise_logs_collection = self.db["exercise_logs"]
         peloton = exercise.get("peloton_data", {})
         today = self.get_today_in_timezone()
@@ -231,6 +248,11 @@ If any field is not visible, use null."""
         }
         
         result = exercise_logs_collection.insert_one(document)
+        self.logger.info(f"✓ Stored exercise log in MongoDB (id: {result.inserted_id})")
+        # Vectorize the exercise record
+        exercise_record = exercise_logs_collection.find_one({"_id": result.inserted_id})
+        if exercise_record:
+            self._vectorize_record(exercise_record, "exercise_logs")
         return str(result.inserted_id)
     
     def _update_training_day(self, date_obj: date, exercise: Dict, exercise_id: str):
@@ -249,6 +271,9 @@ If any field is not visible, use null."""
         else:
             intensity = "high"
         
+        self.logger.info(f"Updating training day: {date_obj.isoformat()}, intensity={intensity}, "
+                        f"{calories} cal")
+        
         training_days_collection.update_one(
             {"date": date_obj.isoformat()},
             {
@@ -262,6 +287,12 @@ If any field is not visible, use null."""
             },
             upsert=True
         )
+        self.logger.info(f"✓ Updated training day in MongoDB (date: {date_obj.isoformat()})")
+        # Vectorize the training day record (fetch it after upsert)
+        # Delete existing vectors first since this is an upsert operation
+        training_day_record = training_days_collection.find_one({"date": date_obj.isoformat()})
+        if training_day_record:
+            self._vectorize_record(training_day_record, "training_days", delete_existing=True)
     
     def _create_exercise_embed(self, exercise: Dict, needs_electrolytes: bool):
         """Generate embed confirmation for standard workout logs."""

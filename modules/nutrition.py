@@ -119,6 +119,8 @@ class NutritionModule(BaseModule):
                         analysis: Dict) -> Dict:
         """Process food/health logging"""
         
+        self.logger.info(f"Processing nutrition log for lifelog_id: {lifelog_id}")
+        
         # message_content now contains the context transcript (last 5 entries from polling batch)
         # No need to fetch full day's transcript
         
@@ -126,6 +128,7 @@ class NutritionModule(BaseModule):
         custom_foods_context = self._get_custom_foods_context()
         
         # Analyze with OpenAI
+        self.logger.debug(f"Analyzing transcript with OpenAI (length: {len(message_content)} chars)")
         prompt = self._build_analysis_prompt(custom_foods_context)
         
         analysis = self.openai_client.analyze_text(
@@ -135,17 +138,28 @@ class NutritionModule(BaseModule):
         )
         
         if not analysis:
+            self.logger.error("No response from OpenAI")
             return {"embed": self._create_error_embed("No response from OpenAI")}
 
         if 'error' in analysis:
+            self.logger.error(f"OpenAI analysis error: {analysis['error']}")
             return {'embed': self._create_error_embed(analysis['error'])}
         
         # Store all detected data
-        self._store_foods(analysis.get('foods_consumed', []), lifelog_id)
-        self._store_hydration(analysis.get('hydration', {}), lifelog_id)
-        self._store_sleep(analysis.get('sleep', {}), lifelog_id)
-        self._store_health_markers(analysis.get('health_markers', {}), lifelog_id)
-        self._store_wellness(analysis.get('wellness', {}), lifelog_id)
+        foods = analysis.get('foods_consumed', [])
+        hydration = analysis.get('hydration', {})
+        sleep = analysis.get('sleep', {})
+        health = analysis.get('health_markers', {})
+        wellness = analysis.get('wellness', {})
+        
+        self.logger.info(f"Detected: {len(foods)} foods, hydration={hydration.get('detected', False)}, "
+                        f"sleep={sleep.get('detected', False)}, health_markers={bool(health)}, wellness={bool(wellness)}")
+        
+        self._store_foods(foods, lifelog_id)
+        self._store_hydration(hydration, lifelog_id)
+        self._store_sleep(sleep, lifelog_id)
+        self._store_health_markers(health, lifelog_id)
+        self._store_wellness(wellness, lifelog_id)
         
         # Get updated summary
         summary = self._get_daily_summary_internal(self.get_today_in_timezone())
@@ -153,6 +167,7 @@ class NutritionModule(BaseModule):
         # Create confirmation embed
         embed = self._create_log_confirmation_embed(summary)
         
+        self.logger.info(f"✓ Successfully processed nutrition log for lifelog_id: {lifelog_id}")
         return {'embed': embed}
     
     async def handle_image(self, image_bytes: bytes, context: str) -> Dict:
@@ -301,8 +316,10 @@ Respond with ONLY valid JSON:
     def _store_foods(self, foods: List[Dict], lifelog_id: str):
         """Store food logs"""
         if not foods:
+            self.logger.debug("No foods to store")
             return
         
+        self.logger.info(f"Storing {len(foods)} food item(s)")
         food_logs_collection = self.db["food_logs"]
         today = self.get_today_in_timezone()
         now = self.get_now_in_timezone()
@@ -323,21 +340,33 @@ Respond with ONLY valid JSON:
                 "lifelog_id": lifelog_id,
                 "created_at": now
             })
+            self.logger.debug(f"  - {food['item']}: {food.get('calories', 0)} cal, "
+                            f"{food.get('protein_g', 0)}g protein")
         
         if documents:
-            food_logs_collection.insert_many(documents)
+            result = food_logs_collection.insert_many(documents)
+            self.logger.info(f"✓ Stored {len(documents)} food log(s) in MongoDB")
+            # Vectorize each inserted document
+            for i, doc in enumerate(documents):
+                doc["_id"] = result.inserted_ids[i]
+                self._vectorize_record(doc, "food_logs")
     
     def _store_hydration(self, hydration: Dict, lifelog_id: str):
         """Store hydration logs"""
         if not hydration.get('detected'):
+            self.logger.debug("No hydration detected")
             return
+        
+        entries = hydration.get('entries', [])
+        total_oz = sum(entry.get('amount_oz', 0) for entry in entries)
+        self.logger.info(f"Storing hydration: {len(entries)} entry/entries, {total_oz} oz total")
         
         hydration_logs_collection = self.db["hydration_logs"]
         today = self.get_today_in_timezone()
         now = self.get_now_in_timezone()
         
         documents = []
-        for entry in hydration.get('entries', []):
+        for entry in entries:
             documents.append({
                 "date": today.isoformat(),
                 "timestamp": now.isoformat(),
@@ -345,14 +374,26 @@ Respond with ONLY valid JSON:
                 "lifelog_id": lifelog_id,
                 "created_at": now
             })
+            self.logger.debug(f"  - {entry['amount_oz']} oz")
         
         if documents:
-            hydration_logs_collection.insert_many(documents)
+            result = hydration_logs_collection.insert_many(documents)
+            self.logger.info(f"✓ Stored {len(documents)} hydration log(s) in MongoDB")
+            # Vectorize each inserted document
+            for i, doc in enumerate(documents):
+                doc["_id"] = result.inserted_ids[i]
+                self._vectorize_record(doc, "hydration_logs")
     
     def _store_sleep(self, sleep: Dict, lifelog_id: str):
         """Store sleep logs"""
         if not sleep.get('detected'):
+            self.logger.debug("No sleep detected")
             return
+        
+        hours = sleep.get('hours', 0)
+        score = sleep.get('sleep_score')
+        quality = sleep.get('quality')
+        self.logger.info(f"Storing sleep: {hours:.1f} hours, score={score}, quality={quality}")
         
         sleep_logs_collection = self.db["sleep_logs"]
         today = self.get_today_in_timezone()
@@ -372,11 +413,24 @@ Respond with ONLY valid JSON:
             },
             upsert=True
         )
+        self.logger.info(f"✓ Stored sleep log in MongoDB (date: {today.isoformat()})")
+        # Vectorize the sleep record (fetch it after upsert)
+        # Delete existing vectors first since this is an upsert operation
+        sleep_record = sleep_logs_collection.find_one({"date": today.isoformat()})
+        if sleep_record:
+            self._vectorize_record(sleep_record, "sleep_logs", delete_existing=True)
     
     def _store_health_markers(self, health: Dict, lifelog_id: str):
         """Store health markers"""
         if not any(health.values()):
+            self.logger.debug("No health markers to store")
             return
+        
+        weight = health.get('weight_lbs')
+        bm = health.get('bowel_movements', 0)
+        electrolytes = health.get('electrolytes_taken')
+        self.logger.info(f"Storing health markers: weight={weight} lbs, "
+                        f"bowel_movements={bm}, electrolytes={electrolytes}")
         
         daily_health_collection = self.db["daily_health"]
         today = self.get_today_in_timezone()
@@ -418,17 +472,27 @@ Respond with ONLY valid JSON:
             {"$set": update_data},
             upsert=True
         )
+        self.logger.info(f"✓ Stored health markers in MongoDB (date: {today.isoformat()})")
+        # Vectorize the health record (fetch it after upsert)
+        # Delete existing vectors first since this is an upsert operation
+        health_record = daily_health_collection.find_one({"date": today.isoformat()})
+        if health_record:
+            self._vectorize_record(health_record, "daily_health", delete_existing=True)
     
     def _store_wellness(self, wellness: Dict, lifelog_id: str):
         """Store wellness scores"""
         if not any(v is not None for v in wellness.values()):
+            self.logger.debug("No wellness scores to store")
             return
+        
+        self.logger.info(f"Storing wellness scores: mood={wellness.get('mood')}, "
+                        f"stress={wellness.get('stress_level')}, energy={wellness.get('energy_score')}")
         
         wellness_scores_collection = self.db["wellness_scores"]
         today = self.get_today_in_timezone()
         now = self.get_now_in_timezone()
         
-        wellness_scores_collection.insert_one({
+        result = wellness_scores_collection.insert_one({
             "date": today.isoformat(),
             "timestamp": now.isoformat(),
             "mood": wellness.get('mood'),
@@ -439,6 +503,11 @@ Respond with ONLY valid JSON:
             "lifelog_id": lifelog_id,
             "created_at": now
         })
+        self.logger.info(f"✓ Stored wellness scores in MongoDB")
+        # Vectorize the wellness record
+        wellness_record = wellness_scores_collection.find_one({"_id": result.inserted_id})
+        if wellness_record:
+            self._vectorize_record(wellness_record, "wellness_scores")
     
     def _get_daily_summary_internal(self, date_obj: date) -> Dict:
         """Calculate daily totals and progress"""

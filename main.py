@@ -16,6 +16,7 @@ import time
 from datetime import datetime, date
 import yaml
 import asyncio
+from utils.logger import get_logger
 
 # Import core services (lazy Discord import handled in core/__init__.py)
 from core import (
@@ -325,16 +326,18 @@ def polling_loop(limitless_client, registry, db, orchestrator):
     """
     global _discord_channel, _discord_channel_lock  # Need to access global variable
     
+    logger = get_logger("polling")
     poll_interval = int(get_env("POLL_INTERVAL", "10"))  # Default 10 seconds
     timezone = get_env("TIMEZONE", "America/Los_Angeles")
     
-    print(f"✅ Limitless polling started (every {poll_interval}s, semantic search, timezone: {timezone})")
-    print("📡 Notifications will be sent when Discord bot is ready (automatic retry)")
+    logger.info(f"Limitless polling started (every {poll_interval}s, semantic search, timezone: {timezone})")
+    logger.info("Notifications will be sent when Discord bot is ready (automatic retry)")
     
     while True:
         try:
             # Search semantically for "log that" or summary requests
             # API returns entries in descending order (newest first), limit 3
+            logger.debug("Searching Limitless API for new entries...")
             entries = limitless_client.search_lifelogs(
                 query="log that or summary request",
                 limit=3,
@@ -344,25 +347,37 @@ def polling_loop(limitless_client, registry, db, orchestrator):
             
             if not entries:
                 # No matching entries - continue polling
-                print(f"🔍 Polling... (no new entries found)")
+                logger.debug("No new entries found")
                 time.sleep(poll_interval)
                 continue
             
-            print(f"📥 Found {len(entries)} entry/entries from semantic search")
+            logger.info(f"Found {len(entries)} entry/entries from semantic search")
             
             # Process each entry
             for entry in entries:
                 lifelog_id = entry.get("id")
                 markdown = entry.get("markdown", "")
                 
+                # Log full markdown for all entries found
+                logger.info("=" * 80)
+                logger.info(f"ENTRY FOUND - ID: {lifelog_id}")
+                logger.info("=" * 80)
+                logger.info("FULL MARKDOWN:")
+                logger.info("-" * 80)
+                logger.info(markdown)
+                logger.info("-" * 80)
+                
                 # Check if already processed
                 if is_entry_processed(db, lifelog_id):
-                    print(f"⏭️  Skipping already-processed entry: {lifelog_id}")
+                    logger.info(f"⏭️  SKIPPING: Entry {lifelog_id} already processed")
+                    logger.info("=" * 80)
                     continue
                 
-                print(f"🔍 Processing entry: {lifelog_id}")
+                logger.info(f"🔄 PROCESSING: Entry {lifelog_id} (length: {len(markdown)} chars)")
+                logger.info("=" * 80)
                 
                 # Route via orchestrator - pass entry markdown directly (API provides full context)
+                logger.debug(f"Routing entry {lifelog_id} via orchestrator")
                 routing_decision = orchestrator.route_intent(
                     transcript=markdown,
                     source="limitless",
@@ -371,7 +386,7 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                 
                 # Handle routing decision
                 if routing_decision.get("error"):
-                    print(f"⚠️  Orchestrator error: {routing_decision['error']}")
+                    logger.error(f"Orchestrator error for entry {lifelog_id}: {routing_decision['error']}")
                     import discord
                     error_embed = discord.Embed(
                         title="❌ Routing Error",
@@ -384,10 +399,12 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                 
                 # Handle RAG queries (needs data from records)
                 if routing_decision.get("needs_rag"):
-                    print(f"🔍 RAG query detected for entry {lifelog_id}")
+                    logger.info(f"RAG query detected for entry {lifelog_id}")
                     # Use the RAG query if provided by LLM, otherwise use original markdown
                     rag_query = routing_decision.get("rag_query") or markdown
+                    logger.debug(f"Answering RAG query: {rag_query[:100]}...")
                     answer = orchestrator.answer_query_with_rag(rag_query)
+                    logger.info(f"✓ RAG query answered (response length: {len(answer)} chars)")
                     
                     import discord
                     # Split long answers into multiple embeds if needed
@@ -406,7 +423,7 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                         import pytz
                         tz = pytz.timezone(timezone)
                         target_date = datetime.now(tz).date()
-                    print(f"📊 Summary request detected for {target_date.isoformat()}")
+                    logger.info(f"Summary request detected for {target_date.isoformat()}")
                     
                     from core.discord_bot import get_summary_for_date
                     summary_embed = await_sync(get_summary_for_date(registry, target_date, channel=None))
@@ -419,7 +436,7 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                 
                 # Handle out of scope
                 if routing_decision.get("out_of_scope") or not routing_decision.get("modules"):
-                    print(f"ℹ️  Entry {lifelog_id} is out of scope or no modules matched")
+                    logger.info(f"Entry {lifelog_id} is out of scope or no modules matched")
                     import discord
                     info_embed = discord.Embed(
                         title="ℹ️ No Action Taken",
@@ -444,33 +461,32 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                             break
                     
                     if not module:
-                        print(f"⚠️  Module '{module_name}' not found in registry")
+                        logger.warning(f"Module '{module_name}' not found in registry")
                         return None
                     
                     if confidence < 0.7:
-                        print(f"⚠️  Skipping {module_name} due to low confidence ({confidence:.2f})")
+                        logger.warning(f"Skipping {module_name} due to low confidence ({confidence:.2f})")
                         return None
                     
                     try:
-                        print(f"🧩 ROUTING: {module_name} ({action}, confidence: {confidence:.2f}) for entry {entry_id}")
+                        logger.info(f"Routing to {module_name} ({action}, confidence: {confidence:.2f}) for entry {entry_id}")
                         
                         if action == "log":
                             result = await module.handle_log(entry_markdown, entry_id, {})
                         elif action == "query":
                             # Queries are now handled by RAG via orchestrator
                             # This should not be reached if orchestrator is working correctly
-                            print(f"⚠️  Query action detected but should use RAG - skipping module query")
+                            logger.warning(f"Query action detected but should use RAG - skipping module query")
                             return None
                         else:
-                            print(f"⚠️  Unknown action: {action}")
+                            logger.warning(f"Unknown action: {action}")
                             return None
                         
+                        logger.info(f"✓ Successfully processed {module_name} for entry {entry_id}")
                         return {"module_name": module_name, "result": result}
                     
                     except Exception as e:
-                        print(f"❌ ERROR processing {module_name} for entry {entry_id}: {e}")
-                        import traceback
-                        traceback.print_exc()
+                        logger.error(f"Error processing {module_name} for entry {entry_id}: {e}", exc_info=True)
                         return {"module_name": module_name, "error": str(e)}
                 
                 # Process all modules in parallel
@@ -514,50 +530,54 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                 
                 # Mark as processed after successful handling
                 if processed_successfully:
+                    logger.info(f"✓ Entry {lifelog_id} processed successfully, marking as processed")
                     mark_entry_processed(db, lifelog_id)
+                else:
+                    logger.warning(f"No successful module results for entry {lifelog_id}, not marking as processed")
             
             time.sleep(poll_interval)
 
         except KeyboardInterrupt:
-            print("\n🛑 Polling stopped by user.")
+            logger.info("Polling stopped by user")
             break
         except Exception as e:
-            print(f"❌ Polling error: {e}")
+            logger.error(f"Polling error: {e}", exc_info=True)
             time.sleep(poll_interval * 2)
 
 
 def main():
     """Main application entry point."""
+    logger = get_logger("main")
+    
     print("=" * 60)
     print("  Personal Automation Platform")
     print("=" * 60)
     print()
 
     # 1. Validate environment
+    logger.info("Validating environment variables...")
     validate_environment()
+    logger.info("✓ Environment validation passed")
 
     # 2. Load configuration
+    logger.info("Loading configuration...")
     config = load_config()
+    logger.info("✓ Configuration loaded")
 
     # 3. Initialize database
+    logger.info("Initializing database...")
     mongodb_url = get_env("MONGODB_URL", "mongodb://localhost:27017/automation_platform")
     db = init_database(mongodb_url)
+    logger.info(f"✓ Database initialized: {mongodb_url}")
 
     # 4. Initialize clients
+    logger.info("Initializing API clients...")
     limitless_client = LimitlessClient(get_env("LIMITLESS_API_KEY"))
     openai_client = OpenAIClient(get_env("OPENAI_API_KEY"))
+    logger.info("✓ API clients initialized")
 
-    # 5. Initialize module registry
-    timezone = get_env("TIMEZONE", "America/Los_Angeles")
-    registry = ModuleRegistry(db, openai_client, limitless_client, config, timezone=timezone)
-
-    print("\nActive Modules:")
-    for module in registry.get_all_modules():
-        keywords = ", ".join(module.get_keywords()[:3])
-        print(f"   • {module.get_name()}: {keywords}...")
-    print()
-
-    # 6. Initialize RAG service
+    # 5. Initialize RAG service (before registry so modules can use it)
+    logger.info("Initializing RAG service...")
     rag_service = None
     try:
         from core.rag_service import RAGService
@@ -569,30 +589,45 @@ def main():
                 index_name=get_env("PINECONE_INDEX_NAME", "rag-chunks"),
                 namespace=get_env("PINECONE_NAMESPACE", "default")
             )
-            print("✅ RAG Service initialized with Pinecone")
+            logger.info("✓ RAG Service initialized with Pinecone")
         else:
-            print("⚠️  PINECONE_API_KEY not set, RAG service disabled")
-            print("   Queries requiring data will not be available.")
+            logger.warning("PINECONE_API_KEY not set, RAG service disabled")
+            logger.warning("Vectorization will be skipped, but logging will continue.")
     except Exception as e:
-        print(f"⚠️  RAG Service initialization failed: {e}")
-        print("   Queries requiring data will not be available.")
+        logger.error(f"RAG Service initialization failed: {e}", exc_info=True)
+        logger.warning("Vectorization will be skipped, but logging will continue.")
+
+    # 6. Initialize module registry (with rag_service for automatic vectorization)
+    logger.info("Initializing module registry...")
+    timezone = get_env("TIMEZONE", "America/Los_Angeles")
+    registry = ModuleRegistry(db, openai_client, limitless_client, config, timezone=timezone, rag_service=rag_service)
+
+    logger.info("Active Modules:")
+    for module in registry.get_all_modules():
+        keywords = ", ".join(module.get_keywords()[:3])
+        logger.info(f"  • {module.get_name()}: {keywords}...")
     
     # 7. Initialize automation orchestrator
+    logger.info("Initializing automation orchestrator...")
     orchestrator = AutomationOrchestrator(openai_client, registry, rag_service=rag_service, timezone=timezone)
-    print("✅ Automation Orchestrator initialized")
+    logger.info("✓ Automation Orchestrator initialized")
 
     # 8. Start scheduler
+    logger.info("Starting scheduler...")
     scheduler = Scheduler(get_env("TIMEZONE", "America/Los_Angeles"))
     scheduler.load_from_registry(registry)
     threading.Thread(target=scheduler.run, daemon=True).start()
+    logger.info("✓ Scheduler started")
 
     # 9. Start Limitless polling
+    logger.info("Starting Limitless polling thread...")
     threading.Thread(
         target=polling_loop, args=(limitless_client, registry, db, orchestrator), daemon=True
     ).start()
+    logger.info("✓ Polling thread started")
 
     # 10. Setup and run Discord bot (lazy import)
-    print("✅ Platform initialized — starting Discord bot...\n")
+    logger.info("Platform initialized — starting Discord bot...")
     print("=" * 60)
     print("  Platform is live!")
     print("  Press Ctrl+C to stop.")
@@ -609,14 +644,12 @@ def main():
     )
 
     try:
+        logger.info("Starting Discord bot...")
         bot.run(get_env("DISCORD_BOT_TOKEN"))
     except KeyboardInterrupt:
-        print("\n👋 Shutting down gracefully...")
+        logger.info("Shutting down gracefully...")
     except Exception as e:
-        print(f"❌ FATAL ERROR: {e}")
-        import traceback
-
-        traceback.print_exc()
+        logger.critical(f"FATAL ERROR: {e}", exc_info=True)
         sys.exit(1)
 
 

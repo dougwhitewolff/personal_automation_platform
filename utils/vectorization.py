@@ -173,22 +173,52 @@ def chunk_record(
     }
     module = module_map.get(collection_name, "unknown")
     
+    # Helper function to convert datetime to ISO string
+    # Handles both Python datetime objects and MongoDB BSON datetime objects
+    def format_timestamp(ts):
+        if ts is None:
+            return None
+        # Check for Python datetime/date objects
+        if isinstance(ts, (datetime, date)):
+            return ts.isoformat()
+        # Check for MongoDB BSON datetime (has datetime attribute)
+        if hasattr(ts, 'isoformat'):
+            return ts.isoformat()
+        # If it's already a string, return as-is
+        if isinstance(ts, str):
+            return ts
+        # Fallback: convert to string
+        return str(ts)
+    
     # Create chunk documents with metadata
     chunk_docs = []
     for i, chunk_text in enumerate(chunks):
+        # Build metadata, excluding None values
+        metadata = {
+            "source_collection": collection_name,
+            "source_id": str(record.get("_id", "")),
+            "date": record.get("date", ""),
+            "module": module,
+            "record_type": collection_name,
+            "chunk_index": i,
+            "total_chunks": len(chunks),
+        }
+        
+        # Add lifelog_id only if it's not None
+        lifelog_id = record.get("lifelog_id")
+        if lifelog_id is not None:
+            metadata["lifelog_id"] = str(lifelog_id)
+        
+        # Add timestamp only if it exists, and convert datetime to string
+        # Check both timestamp and created_at fields, handling datetime objects
+        timestamp = record.get("timestamp") or record.get("created_at")
+        formatted_timestamp = format_timestamp(timestamp)
+        if formatted_timestamp is not None:
+            metadata["timestamp"] = formatted_timestamp
+        
         chunk_doc = {
             "text": chunk_text,
-            "metadata": {
-                "source_collection": collection_name,
-                "source_id": str(record.get("_id", "")),
-                "date": record.get("date", ""),
-                "module": module,
-                "record_type": collection_name,
-                "chunk_index": i,
-                "total_chunks": len(chunks),
-                "lifelog_id": record.get("lifelog_id"),
-                "timestamp": record.get("timestamp") or record.get("created_at")
-            }
+            "metadata": metadata
         }
         chunk_docs.append(chunk_doc)
     
