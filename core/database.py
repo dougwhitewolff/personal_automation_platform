@@ -64,7 +64,10 @@ def init_database(mongodb_url: str = None):
     # Note: Vector search index must be created in MongoDB Atlas UI/API
     # This collection will store chunked documents with embeddings
     
-    print("✅ Core database initialized")
+    try:
+        print("✅ Core database initialized")
+    except UnicodeEncodeError:
+        print("[OK] Core database initialized")
     return db
 
 

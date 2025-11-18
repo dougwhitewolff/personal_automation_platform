@@ -3,7 +3,7 @@
 Batch vectorization script for existing MongoDB records.
 
 This script vectorizes all existing records in the database collections
-for use with the RAG pipeline.
+for use with the RAG pipeline. It reads from MongoDB and stores vectors in Pinecone.
 """
 
 import sys
@@ -27,33 +27,58 @@ def main():
     print("=" * 60)
     print()
     
-    # Initialize database
+    # Helper function for safe printing on Windows
+    def safe_print(text):
+        try:
+            print(text)
+        except UnicodeEncodeError:
+            # Replace common emojis with ASCII alternatives
+            text = text.replace("✅", "[OK]")
+            text = text.replace("❌", "[ERROR]")
+            text = text.replace("⚠️", "[WARN]")
+            text = text.replace("📦", "[INFO]")
+            text = text.replace("ℹ️", "[INFO]")
+            print(text)
+    
+    # Initialize database (for reading source data)
     mongodb_url = get_env("MONGODB_URL", "mongodb://localhost:27017/automation_platform")
     db = init_database(mongodb_url)
+    safe_print("✅ MongoDB connection established (for reading source data)")
     
-    # Initialize RAG service
+    # Get API keys
     openai_api_key = get_env("OPENAI_API_KEY")
     if not openai_api_key:
-        print("❌ ERROR: OPENAI_API_KEY environment variable not set")
+        safe_print("❌ ERROR: OPENAI_API_KEY environment variable not set")
         sys.exit(1)
     
+    pinecone_api_key = get_env("PINECONE_API_KEY")
+    if not pinecone_api_key:
+        safe_print("❌ ERROR: PINECONE_API_KEY environment variable not set")
+        print("   Please set PINECONE_API_KEY in your environment or .env file")
+        sys.exit(1)
+    
+    # Initialize RAG service with Pinecone
     try:
+        index_name = get_env("PINECONE_INDEX_NAME", "rag-chunks")
+        namespace = get_env("PINECONE_NAMESPACE", "default")
+        
         rag_service = RAGService(
-            db=db,
+            pinecone_api_key=pinecone_api_key,
             openai_api_key=openai_api_key,
-            collection_name="rag_chunks",
-            index_name="vector_index"
+            index_name=index_name,
+            namespace=namespace
         )
-        print("✅ RAG Service initialized")
+        safe_print(f"✅ RAG Service initialized with Pinecone")
+        print(f"   Index: {index_name}")
+        print(f"   Namespace: {namespace}")
     except Exception as e:
-        print(f"❌ ERROR: Failed to initialize RAG service: {e}")
+        safe_print(f"❌ ERROR: Failed to initialize RAG service: {e}")
         sys.exit(1)
     
-    # Check if vector search index exists
-    print("\nℹ️  Note: Make sure the vector search index 'vector_index' exists in MongoDB Atlas")
-    print("   Collection: rag_chunks")
-    print("   Index configuration:")
-    print("   - Fields: [{'type': 'vector', 'path': 'embedding', 'numDimensions': 1536, 'similarity': 'cosine'}]")
+    print()
+    safe_print("ℹ️  This script will:")
+    print("   1. Read records from MongoDB collections")
+    print("   2. Vectorize and store them in Pinecone")
     print()
     
     response = input("Continue with vectorization? (y/n): ")

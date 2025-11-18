@@ -16,6 +16,86 @@ from datetime import date, datetime, timedelta
 import pytz
 
 
+async def send_long_message(channel, content: str, max_length: int = 2000):
+    """
+    Send a message that may exceed Discord's character limit.
+    Splits into multiple messages or uses an embed if needed.
+    
+    Args:
+        channel: Discord channel to send to
+        content: Message content to send
+        max_length: Maximum length for plain messages (default 2000)
+    """
+    if len(content) <= max_length:
+        # Short enough for a plain message
+        await channel.send(content)
+        return
+    
+    # Too long for plain message, use embed
+    # Discord embed description limit is 4096 characters
+    if len(content) <= 4096:
+        embed = discord.Embed(
+            description=content,
+            color=0x0099ff
+        )
+        await channel.send(embed=embed)
+        return
+    
+    # Even too long for embed description, split into multiple embeds
+    # Split at paragraph boundaries when possible
+    chunks = []
+    current_chunk = ""
+    
+    # Try to split by double newlines first (paragraphs)
+    paragraphs = content.split("\n\n")
+    
+    for paragraph in paragraphs:
+        # If adding this paragraph would exceed limit, save current chunk and start new one
+        if len(current_chunk) + len(paragraph) + 2 > 4096:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = paragraph
+        else:
+            if current_chunk:
+                current_chunk += "\n\n" + paragraph
+            else:
+                current_chunk = paragraph
+    
+    # Add the last chunk
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    
+    # If still too long, split by sentences
+    if not chunks or any(len(chunk) > 4096 for chunk in chunks):
+        chunks = []
+        sentences = content.split(". ")
+        current_chunk = ""
+        
+        for sentence in sentences:
+            if len(current_chunk) + len(sentence) + 2 > 4096:
+                if current_chunk:
+                    chunks.append(current_chunk.strip() + ".")
+                current_chunk = sentence
+            else:
+                if current_chunk:
+                    current_chunk += ". " + sentence
+                else:
+                    current_chunk = sentence
+        
+        if current_chunk:
+            chunks.append(current_chunk.strip() + ("." if not current_chunk.endswith(".") else ""))
+    
+    # Send each chunk as an embed
+    for i, chunk in enumerate(chunks):
+        embed = discord.Embed(
+            description=chunk,
+            color=0x0099ff
+        )
+        if len(chunks) > 1:
+            embed.set_footer(text=f"Part {i + 1} of {len(chunks)}")
+        await channel.send(embed=embed)
+
+
 async def get_summary_for_date(registry, target_date: date, channel=None):
     """
     Helper function to get and format summary for a specific date.
@@ -202,8 +282,10 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
                 # Check for RAG query (needs data from records)
                 if routing_decision.get("needs_rag"):
                     async with message.channel.typing():
-                        answer = orchestrator.answer_query_with_rag(content)
-                        await message.channel.send(answer)
+                        # Use the RAG query if provided by LLM, otherwise use original content
+                        rag_query = routing_decision.get("rag_query") or content
+                        answer = orchestrator.answer_query_with_rag(rag_query)
+                        await send_long_message(message.channel, answer)
                     return
                 
                 # Check for direct answer (in-scope but no module routing)

@@ -198,6 +198,7 @@ class AutomationOrchestrator:
                 "out_of_scope": True,
                 "direct_answer": None,
                 "needs_rag": False,
+                "rag_query": None,
                 "reasoning": "Empty transcript",
                 "error": None
             }
@@ -215,6 +216,7 @@ class AutomationOrchestrator:
                 "out_of_scope": False,
                 "direct_answer": None,
                 "needs_rag": False,
+                "rag_query": None,
                 "reasoning": f"Summary request detected for {target_date.isoformat()}",
                 "error": None
             }
@@ -230,6 +232,7 @@ class AutomationOrchestrator:
                 "out_of_scope": False,
                 "direct_answer": None,
                 "needs_rag": False,
+                "rag_query": None,
                 "reasoning": "No modules available",
                 "error": "No modules loaded in registry"
             }
@@ -263,9 +266,14 @@ class AutomationOrchestrator:
                 "name": "get_daily_summary",
                 "description": (
                     "Get a daily summary of all tracked data (nutrition, workouts, sleep, health) "
-                    "for a specific date. Use this when the user asks for a summary, overview, "
-                    "or wants to see what they did on a particular day. Examples: 'show me my summary', "
-                    "'what did I do yesterday', 'give me a summary for last week', 'show stats for 2024-01-15'."
+                    "for a specific date. Use this ONLY when the user explicitly asks for a summary, "
+                    "overview, or a list of what they did on a particular day. "
+                    "DO NOT use this for analytical questions, comparisons, evaluations, or questions that require "
+                    "reasoning about relationships between data points. "
+                    "Examples: 'show me my summary', 'what did I do yesterday', 'give me a summary for last week', "
+                    "'show stats for 2024-01-15'. "
+                    "NOT for: 'is my sleep aligned with my workouts', 'how is my nutrition', 'tell me about my progress', "
+                    "'can you tell me whether my sleep is properly aligned with my nutrition and workout'."
                 ),
                 "parameters": {
                     "type": "object",
@@ -295,6 +303,46 @@ class AutomationOrchestrator:
             }
         }
         tools.append(summary_tool)
+        
+        # Add RAG tool for answering analytical/comparative questions that need data
+        if self.rag_service:
+            rag_tool = {
+                "type": "function",
+                "function": {
+                    "name": "answer_query_with_rag",
+                    "description": (
+                        "Answer a question using the user's historical data and records. "
+                        "Use this for analytical questions, comparisons, evaluations, or any questions that require "
+                        "reasoning about relationships between data points, trends, patterns, or insights from the user's data. "
+                        "This tool searches through the user's logged data (nutrition, workouts, sleep, health metrics, etc.) "
+                        "and provides answers based on their actual records. "
+                        "Examples: 'is my sleep aligned with my workouts', 'how is my nutrition', 'tell me about my progress', "
+                        "'can you tell me whether my sleep is properly aligned with my nutrition and workout', "
+                        "'what's my average protein intake', 'how has my weight changed', 'compare my sleep and workout patterns'."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The user's question or query that needs to be answered using their data"
+                            },
+                            "confidence": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1,
+                                "description": "Confidence score (0-1) that this query needs RAG to answer"
+                            },
+                            "reasoning": {
+                                "type": "string",
+                                "description": "Brief explanation of why this query needs RAG"
+                            }
+                        },
+                        "required": ["query", "confidence", "reasoning"]
+                    }
+                }
+            }
+            tools.append(rag_tool)
         
         # Add module tools
         modules = self.registry.get_all_modules()
@@ -399,16 +447,22 @@ class AutomationOrchestrator:
         else:  # discord
             system_prompt = (
                 "You are an intent classification system for a personal automation platform. "
-                "Analyze the user's message and determine which module(s) should handle it. "
+                "Analyze the user's message and determine which tool(s) should handle it. "
                 "The message could be a question, a command to log data, a request for a summary, or a general query. "
-                "If the user is asking for a summary, overview, or wants to see what they did on a particular day, "
-                "use the 'get_daily_summary' function. "
-                "Use 'log' action for logging/recording data. "
-                "For questions that need data/records to answer, use 'query' action. "
-                "You can select multiple modules if the request spans multiple domains. "
-                "Only select modules if you are confident (>= 0.7) they should handle the request. "
+                "\n\n"
+                "AVAILABLE TOOLS:\n"
+                "- 'get_daily_summary': Use ONLY for explicit requests for summaries/overviews (e.g., 'show me my summary', 'what did I do today')\n"
+                "- 'answer_query_with_rag': Use for analytical questions, comparisons, evaluations, or questions requiring reasoning "
+                "about relationships between data points, trends, or insights from the user's historical data "
+                "(e.g., 'is my sleep aligned with workouts', 'tell me whether X is properly aligned with Y', "
+                "'how is my nutrition', 'what's my progress')\n"
+                "- Module tools (e.g., 'nutrition_module', 'workout_module'): Use 'log' action for logging/recording data, "
+                "or 'query' action for simple questions that a specific module can answer directly\n"
+                "\n"
+                "You can select multiple tools/modules if the request spans multiple domains. "
+                "Only select tools if you are confident (>= 0.7) they should handle the request. "
                 "If the request is completely out of scope (e.g., asking about weather, news, etc.), "
-                "do not call any functions and indicate it's out of scope."
+                "do not call any functions."
             )
         
         user_prompt = f"User message/transcript:\n\n{transcript}"
@@ -433,7 +487,7 @@ class AutomationOrchestrator:
             # tool_calls can be None or an empty list
             tool_calls = getattr(message, 'tool_calls', None)
             if not tool_calls or len(tool_calls) == 0:
-                # No tools called - determine if it's a query needing data or general question
+                # No tools called - check scope and provide direct answer if in scope
                 scope_check = self._check_scope(transcript)
                 
                 if not scope_check["in_scope"]:
@@ -445,27 +499,13 @@ class AutomationOrchestrator:
                         "out_of_scope": True,
                         "direct_answer": None,
                         "needs_rag": False,
-                        "reasoning": scope_check.get("reasoning") or getattr(message, 'content', None) or "No relevant modules found for this request",
+                        "rag_query": None,
+                        "reasoning": scope_check.get("reasoning") or getattr(message, 'content', None) or "No relevant tools found for this request",
                         "error": None
                     }
                 
-                # Check if query needs data (RAG) or can be answered directly
-                needs_data = self._query_needs_data(transcript)
-                
-                if needs_data and self.rag_service:
-                    # Query needs data - use RAG
-                    return {
-                        "modules": [],
-                        "summary_request": False,
-                        "summary_date": None,
-                        "out_of_scope": False,
-                        "direct_answer": None,
-                        "needs_rag": True,
-                        "reasoning": "Query requires data from records",
-                        "error": None
-                    }
-                elif self.scope_config.get("scope_config", {}).get("allow_direct_answers", True):
-                    # General question - direct answer
+                # If in scope but no tools called, provide direct answer if allowed
+                if self.scope_config.get("scope_config", {}).get("allow_direct_answers", True):
                     direct_answer = self._generate_direct_answer(transcript, source)
                     return {
                         "modules": [],
@@ -474,6 +514,7 @@ class AutomationOrchestrator:
                         "out_of_scope": False,
                         "direct_answer": direct_answer,
                         "needs_rag": False,
+                        "rag_query": None,
                         "reasoning": f"In-scope general query: {scope_check['reasoning']}",
                         "error": None
                     }
@@ -486,14 +527,17 @@ class AutomationOrchestrator:
                         "out_of_scope": False,
                         "direct_answer": None,
                         "needs_rag": False,
+                        "rag_query": None,
                         "reasoning": "Query in scope but cannot be answered",
                         "error": None
                     }
             
-            # Parse tool calls into module routing decisions
+            # Parse tool calls into routing decisions
             modules = []
             summary_request = False
             summary_date = None
+            rag_query = None
+            rag_confidence = 0.0
             
             for tool_call in tool_calls:
                 function_name = tool_call.function.name
@@ -512,6 +556,12 @@ class AutomationOrchestrator:
                             summary_date = self._get_today_in_timezone()  # Default to today in configured timezone
                     continue
                 
+                # Check if this is a RAG query
+                if function_name == "answer_query_with_rag":
+                    rag_query = arguments.get("query", transcript)  # Fallback to original transcript if not provided
+                    rag_confidence = arguments.get("confidence", 0.8)
+                    continue
+                
                 # Extract module name from function name (e.g., "nutrition_module" -> "nutrition")
                 module_name = function_name.replace("_module", "")
                 
@@ -522,6 +572,20 @@ class AutomationOrchestrator:
                     "reasoning": arguments.get("reasoning", "Selected by AI")
                 })
             
+            # If RAG was requested, return RAG routing decision
+            if rag_query:
+                return {
+                    "modules": [],
+                    "summary_request": False,
+                    "summary_date": None,
+                    "out_of_scope": False,
+                    "direct_answer": None,
+                    "needs_rag": True,
+                    "rag_query": rag_query,
+                    "reasoning": f"RAG query detected (confidence: {rag_confidence:.2f})",
+                    "error": None
+                }
+            
             # If summary was requested, return summary routing decision
             if summary_request:
                 return {
@@ -531,6 +595,7 @@ class AutomationOrchestrator:
                     "out_of_scope": False,
                     "direct_answer": None,
                     "needs_rag": False,
+                    "rag_query": None,
                     "reasoning": f"Summary request detected for {summary_date.isoformat()}",
                     "error": None
                 }
@@ -550,6 +615,7 @@ class AutomationOrchestrator:
                 "out_of_scope": out_of_scope,
                 "direct_answer": None,
                 "needs_rag": has_query_action and self.rag_service is not None,
+                "rag_query": transcript if has_query_action and self.rag_service is not None else None,
                 "reasoning": f"Selected {len(modules)} module(s) with max confidence {max_confidence:.2f}",
                 "error": None
             }
@@ -562,6 +628,7 @@ class AutomationOrchestrator:
                 "out_of_scope": False,
                 "direct_answer": None,
                 "needs_rag": False,
+                "rag_query": None,
                 "reasoning": "Failed to parse tool call arguments",
                 "error": f"JSON decode error: {str(e)}"
             }
@@ -573,6 +640,7 @@ class AutomationOrchestrator:
                 "out_of_scope": False,
                 "direct_answer": None,
                 "needs_rag": False,
+                "rag_query": None,
                 "reasoning": "Error during intent classification",
                 "error": str(e)
             }
@@ -602,13 +670,15 @@ class AutomationOrchestrator:
                     "reasoning": "Matched via keyword fallback"
                 })
         
+        has_query_action = any(m.get("action") == "query" for m in modules)
         return {
             "modules": modules,
             "summary_request": False,
             "summary_date": None,
             "out_of_scope": len(modules) == 0,
             "direct_answer": None,
-            "needs_rag": any(m.get("action") == "query" for m in modules) and self.rag_service is not None,
+            "needs_rag": has_query_action and self.rag_service is not None,
+            "rag_query": transcript if has_query_action and self.rag_service is not None else None,
             "reasoning": "Fallback keyword matching",
             "error": None
         }
@@ -770,21 +840,36 @@ class AutomationOrchestrator:
         data_keywords = [
             "my", "i", "me", "today", "yesterday", "this week", "last week",
             "how much", "how many", "what did", "when did", "did i",
-            "have i", "show me", "tell me about", "what is my", "what was my",
+            "have i", "show me", "tell me", "tell me about", "what is my", "what was my",
             "calories", "protein", "workout", "exercise", "food", "meal",
             "sleep", "weight", "hydration", "water", "mood", "energy",
-            "summary", "stats", "progress", "total", "average"
+            "summary", "stats", "progress", "total", "average", "nutrition"
+        ]
+        
+        # Analytical/comparative keywords that definitely need RAG
+        analytical_keywords = [
+            "aligned", "alignment", "whether", "properly", "compare", "comparison",
+            "relationship", "correlation", "affect", "impact", "influence",
+            "better", "worse", "improve", "decline", "trend", "pattern"
         ]
         
         # Check if query contains data-related keywords
         has_data_keywords = any(keyword in transcript_lower for keyword in data_keywords)
         
-        # Check if it's a question (starts with question words)
+        # Check if it contains analytical keywords (strong indicator for RAG)
+        has_analytical_keywords = any(keyword in transcript_lower for keyword in analytical_keywords)
+        
+        # Check if it's a question (starts with question words or contains question patterns)
         is_question = any(transcript_lower.strip().startswith(q) for q in [
             "how", "what", "when", "where", "who", "why", "did", "have", "has",
             "was", "were", "is", "are", "can", "could", "would", "should"
-        ])
+        ]) or "?" in transcript or any(q in transcript_lower for q in ["can you", "could you", "would you"])
         
+        # If it has analytical keywords, it definitely needs RAG
+        if has_analytical_keywords:
+            return True
+        
+        # Otherwise, check if it's a question with data keywords
         return has_data_keywords and is_question
     
     def answer_query_with_rag(self, query: str) -> str:

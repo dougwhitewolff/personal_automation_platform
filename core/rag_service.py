@@ -1,50 +1,70 @@
 """
 RAG (Retrieval-Augmented Generation) Service.
 
-Handles semantic search and question answering using MongoDB Atlas Vector Search.
+Handles semantic search and question answering using Pinecone Vector Database.
 """
 
+# Windows compatibility: ensure readline is available before Pinecone imports it
+import sys
+if sys.platform == "win32":
+    try:
+        import readline
+    except ImportError:
+        try:
+            import pyreadline3 as readline
+            sys.modules['readline'] = readline
+        except ImportError:
+            pass  # readline is optional for Pinecone functionality
+
 from typing import List, Dict, Optional, Any
-from pymongo.database import Database
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_mongodb import MongoDBAtlasVectorSearch
+from langchain_pinecone import PineconeVectorStore
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+from pinecone import Pinecone, ServerlessSpec
 import os
 
 
 class RAGService:
     """
-    RAG service for answering questions using vector search over MongoDB records.
+    RAG service for answering questions using vector search over Pinecone records.
     """
     
     def __init__(
         self,
-        db: Database,
+        pinecone_api_key: str,
         openai_api_key: str,
-        collection_name: str = "rag_chunks",
-        index_name: str = "vector_index",
+        index_name: str = "rag-chunks",
+        namespace: str = "default",
         embedding_model: str = "text-embedding-3-small",
         llm_model: str = "gpt-5-nano",
-        top_k: int = 5
+        top_k: int = 5,
+        dimension: int = 1536
     ):
         """
         Initialize RAG service.
         
         Args:
-            db: MongoDB database instance
+            pinecone_api_key: Pinecone API key
             openai_api_key: OpenAI API key
-            collection_name: Name of the vector store collection
-            index_name: Name of the vector search index
+            index_name: Name of the Pinecone index
+            namespace: Pinecone namespace (default: "default")
             embedding_model: OpenAI embedding model name
             llm_model: OpenAI LLM model name
             top_k: Number of top results to retrieve
+            dimension: Vector dimension (1536 for text-embedding-3-small)
         """
-        self.db = db
-        self.collection_name = collection_name
         self.index_name = index_name
+        self.namespace = namespace
         self.top_k = top_k
+        self.dimension = dimension
+        
+        # Initialize Pinecone client
+        self.pinecone_client = Pinecone(api_key=pinecone_api_key)
+        
+        # Ensure index exists
+        self._ensure_index_exists(dimension)
         
         # Initialize embeddings
         self.embeddings = OpenAIEmbeddings(
@@ -53,10 +73,11 @@ class RAGService:
         )
         
         # Initialize vector store
-        self.vector_store = MongoDBAtlasVectorSearch(
-            collection=db[collection_name],
+        self.vector_store = PineconeVectorStore(
+            index_name=index_name,
             embedding=self.embeddings,
-            index_name=index_name
+            namespace=namespace,
+            pinecone_api_key=pinecone_api_key
         )
         
         # Initialize LLM
@@ -157,7 +178,10 @@ Answer the question based on the context provided. If the context doesn't have e
             ids = self.vector_store.add_documents(langchain_docs)
             return ids
         except Exception as e:
-            print(f"⚠️  Error adding documents to vector store: {e}")
+            try:
+                print(f"⚠️  Error adding documents to vector store: {e}")
+            except UnicodeEncodeError:
+                print(f"[WARN] Error adding documents to vector store: {e}")
             return []
     
     def delete_documents_by_source_id(self, source_id: str, collection_name: str) -> bool:
@@ -172,14 +196,46 @@ Answer the question based on the context provided. If the context doesn't have e
             True if successful
         """
         try:
-            collection = self.db[self.collection_name]
-            result = collection.delete_many({
-                "metadata.source_id": source_id,
-                "metadata.source_collection": collection_name
-            })
-            return result.deleted_count > 0
+            index = self.pinecone_client.Index(self.index_name)
+            
+            # Try to delete using filter (supported in newer Pinecone versions)
+            try:
+                index.delete(
+                    filter={
+                        "source_id": {"$eq": source_id},
+                        "source_collection": {"$eq": collection_name}
+                    },
+                    namespace=self.namespace
+                )
+                return True
+            except Exception:
+                # Fallback: Query first, then delete by IDs
+                # Use a small random vector for the query (Pinecone requires a vector)
+                import random
+                query_vector = [random.random() * 0.001 for _ in range(self.dimension)]
+                
+                query_results = index.query(
+                    vector=query_vector,
+                    top_k=10000,  # Large number to get all matches
+                    include_metadata=True,
+                    filter={
+                        "source_id": {"$eq": source_id},
+                        "source_collection": {"$eq": collection_name}
+                    },
+                    namespace=self.namespace
+                )
+                
+                if query_results.matches:
+                    ids_to_delete = [match.id for match in query_results.matches]
+                    if ids_to_delete:
+                        index.delete(ids=ids_to_delete, namespace=self.namespace)
+                        return True
+                return False
         except Exception as e:
-            print(f"⚠️  Error deleting documents from vector store: {e}")
+            try:
+                print(f"⚠️  Error deleting documents from vector store: {e}")
+            except UnicodeEncodeError:
+                print(f"[WARN] Error deleting documents from vector store: {e}")
             return False
     
     def vectorize_record(self, record: Dict, collection_name: str) -> bool:
@@ -187,7 +243,7 @@ Answer the question based on the context provided. If the context doesn't have e
         Convenience method to vectorize a single record.
         
         Args:
-            record: MongoDB document to vectorize
+            record: Document to vectorize (dict with data)
             collection_name: Name of the source collection
             
         Returns:
@@ -201,17 +257,49 @@ Answer the question based on the context provided. If the context doesn't have e
                 return True
             return False
         except Exception as e:
-            print(f"⚠️  Error vectorizing record: {e}")
+            try:
+                print(f"⚠️  Error vectorizing record: {e}")
+            except UnicodeEncodeError:
+                print(f"[WARN] Error vectorizing record: {e}")
             return False
     
-    def ensure_index_exists(self):
+    def _ensure_index_exists(self, dimension: int = 1536):
         """
-        Ensure the vector search index exists in MongoDB Atlas.
-        This is a placeholder - actual index creation must be done via MongoDB Atlas UI or API.
+        Ensure the Pinecone index exists, create it if it doesn't.
+        
+        Args:
+            dimension: Vector dimension (default: 1536 for text-embedding-3-small)
         """
-        print(f"ℹ️  Vector search index '{self.index_name}' should be created in MongoDB Atlas.")
-        print(f"   Collection: {self.collection_name}")
-        print(f"   Index configuration:")
-        print(f"   - Fields: [{{'type': 'vector', 'path': 'embedding', 'numDimensions': 1536, 'similarity': 'cosine'}}]")
-        print(f"   - Collection: {self.collection_name}")
+        def safe_print(text):
+            """Safe print that handles Windows encoding issues."""
+            try:
+                print(text)
+            except UnicodeEncodeError:
+                text = text.replace("✅", "[OK]")
+                text = text.replace("❌", "[ERROR]")
+                text = text.replace("⚠️", "[WARN]")
+                text = text.replace("📦", "[INFO]")
+                text = text.replace("ℹ️", "[INFO]")
+                print(text)
+        
+        try:
+            existing_indexes = [index.name for index in self.pinecone_client.list_indexes()]
+            
+            if self.index_name not in existing_indexes:
+                safe_print(f"📦 Creating Pinecone index '{self.index_name}'...")
+                self.pinecone_client.create_index(
+                    name=self.index_name,
+                    dimension=dimension,
+                    metric="cosine",
+                    spec=ServerlessSpec(
+                        cloud="aws",
+                        region="us-east-1"  # Default region, can be configured
+                    )
+                )
+                safe_print(f"✅ Pinecone index '{self.index_name}' created successfully")
+            else:
+                safe_print(f"✅ Pinecone index '{self.index_name}' already exists")
+        except Exception as e:
+            safe_print(f"⚠️  Error ensuring index exists: {e}")
+            raise
 

@@ -51,6 +51,91 @@ def set_discord_bot_loop(loop):
         _discord_bot_loop = loop
         print(f'🔧 DEBUG: Bot event loop registered: {_discord_bot_loop is not None}')
 
+
+def _create_embeds_from_long_content(content: str, title: str = None, color: int = 0x0099ff, max_length: int = 4096):
+    """
+    Create one or more Discord embeds from content that may exceed Discord's limits.
+    
+    Args:
+        content: Content to put in embed description
+        title: Title for the embed(s)
+        color: Color for the embed(s)
+        max_length: Maximum length for embed description (default 4096)
+        
+    Returns:
+        List of discord.Embed objects
+    """
+    import discord
+    
+    if len(content) <= max_length:
+        # Short enough for a single embed
+        embed = discord.Embed(
+            title=title,
+            description=content,
+            color=color
+        )
+        return [embed]
+    
+    # Too long, split into multiple embeds
+    embeds = []
+    chunks = []
+    current_chunk = ""
+    
+    # Try to split by double newlines first (paragraphs)
+    paragraphs = content.split("\n\n")
+    
+    for paragraph in paragraphs:
+        # If adding this paragraph would exceed limit, save current chunk and start new one
+        if len(current_chunk) + len(paragraph) + 2 > max_length:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = paragraph
+        else:
+            if current_chunk:
+                current_chunk += "\n\n" + paragraph
+            else:
+                current_chunk = paragraph
+    
+    # Add the last chunk
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    
+    # If still too long, split by sentences
+    if not chunks or any(len(chunk) > max_length for chunk in chunks):
+        chunks = []
+        sentences = content.split(". ")
+        current_chunk = ""
+        
+        for sentence in sentences:
+            if len(current_chunk) + len(sentence) + 2 > max_length:
+                if current_chunk:
+                    chunks.append(current_chunk.strip() + ".")
+                current_chunk = sentence
+            else:
+                if current_chunk:
+                    current_chunk += ". " + sentence
+                else:
+                    current_chunk = sentence
+        
+        if current_chunk:
+            chunks.append(current_chunk.strip() + ("." if not current_chunk.endswith(".") else ""))
+    
+    # Create embeds for each chunk
+    for i, chunk in enumerate(chunks):
+        chunk_title = title
+        if len(chunks) > 1:
+            chunk_title = f"{title} (Part {i + 1}/{len(chunks)})" if title else f"Part {i + 1}/{len(chunks)}"
+        
+        embed = discord.Embed(
+            title=chunk_title,
+            description=chunk,
+            color=color
+        )
+        embeds.append(embed)
+    
+    return embeds
+
+
 async def _send_notification_async(embed=None, content=None):
     """
     Internal async function to send notification.
@@ -300,15 +385,15 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                 # Handle RAG queries (needs data from records)
                 if routing_decision.get("needs_rag"):
                     print(f"🔍 RAG query detected for entry {lifelog_id}")
-                    answer = orchestrator.answer_query_with_rag(markdown)
+                    # Use the RAG query if provided by LLM, otherwise use original markdown
+                    rag_query = routing_decision.get("rag_query") or markdown
+                    answer = orchestrator.answer_query_with_rag(rag_query)
                     
                     import discord
-                    answer_embed = discord.Embed(
-                        title="💬 Answer",
-                        description=answer,
-                        color=0x0099ff
-                    )
-                    send_limitless_notification(embed=answer_embed)
+                    # Split long answers into multiple embeds if needed
+                    embeds = _create_embeds_from_long_content(answer, title="💬 Answer", color=0x0099ff)
+                    for embed in embeds:
+                        send_limitless_notification(embed=embed)
                     mark_entry_processed(db, lifelog_id)
                     continue
                 
@@ -476,13 +561,18 @@ def main():
     rag_service = None
     try:
         from core.rag_service import RAGService
-        rag_service = RAGService(
-            db=db,
-            openai_api_key=get_env("OPENAI_API_KEY"),
-            collection_name="rag_chunks",
-            index_name="vector_index"
-        )
-        print("✅ RAG Service initialized")
+        pinecone_api_key = get_env("PINECONE_API_KEY")
+        if pinecone_api_key:
+            rag_service = RAGService(
+                pinecone_api_key=pinecone_api_key,
+                openai_api_key=get_env("OPENAI_API_KEY"),
+                index_name=get_env("PINECONE_INDEX_NAME", "rag-chunks"),
+                namespace=get_env("PINECONE_NAMESPACE", "default")
+            )
+            print("✅ RAG Service initialized with Pinecone")
+        else:
+            print("⚠️  PINECONE_API_KEY not set, RAG service disabled")
+            print("   Queries requiring data will not be available.")
     except Exception as e:
         print(f"⚠️  RAG Service initialization failed: {e}")
         print("   Queries requiring data will not be available.")
