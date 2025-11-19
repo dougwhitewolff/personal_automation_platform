@@ -18,6 +18,7 @@ from typing import Dict
 import yaml
 import asyncio
 from utils.logger import get_logger
+from utils.helpers import extract_context_before_log_that
 
 # Import core services (lazy Discord import handled in core/__init__.py)
 from core import (
@@ -436,10 +437,18 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                 logger.info(f"🔄 PROCESSING: Entry {lifelog_id} (length: {len(markdown)} chars)")
                 logger.info("=" * 80)
                 
-                # Route via orchestrator - pass entry markdown directly (API provides full context)
+                # Extract up to 5 sentences before 'log that' to reduce LLM processing
+                extracted_context = extract_context_before_log_that(markdown, max_sentences=5)
+                logger.info(f"📝 Extracted context (length: {len(extracted_context)} chars, original: {len(markdown)} chars)")
+                if extracted_context != markdown:
+                    logger.info(f"📝 Extracted context preview: {extracted_context[:300]}{'...' if len(extracted_context) > 300 else ''}")
+                else:
+                    logger.info("📝 No 'log that' found - using full markdown")
+                
+                # Route via orchestrator - pass extracted context instead of full markdown
                 logger.debug(f"Routing entry {lifelog_id} via orchestrator")
                 routing_decision = orchestrator.route_intent(
-                    transcript=markdown,
+                    transcript=extracted_context,
                     source="limitless",
                     context={"lifelog_id": lifelog_id}
                 )
@@ -505,8 +514,8 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                 # Handle RAG queries (needs data from records)
                 if routing_decision.get("needs_rag"):
                     logger.info(f"RAG query detected for entry {lifelog_id}")
-                    # Use the RAG query if provided by LLM, otherwise use original markdown
-                    rag_query = routing_decision.get("rag_query") or markdown
+                    # Use the RAG query if provided by LLM, otherwise use extracted context
+                    rag_query = routing_decision.get("rag_query") or extracted_context
                     logger.debug(f"Answering RAG query: {rag_query[:100]}...")
                     answer = orchestrator.answer_query_with_rag(rag_query)
                     logger.info(f"✓ RAG query answered (response length: {len(answer)} chars)")
@@ -645,7 +654,7 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                     tasks = [
                         process_module_async(
                             module_decision,
-                            markdown,
+                            extracted_context,
                             lifelog_id,
                             module_decision.get("action", "log")
                         )
@@ -657,7 +666,7 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                     result = await_sync(
                         process_module_async(
                             module_decision,
-                            markdown,
+                            extracted_context,
                             lifelog_id,
                             module_decision.get("action", "log")
                         )

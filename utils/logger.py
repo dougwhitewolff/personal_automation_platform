@@ -53,13 +53,9 @@ def setup_logger(
     return logger
 
 
-# Global logger instance
-_logger: Optional[logging.Logger] = None
-
-
 def get_logger(name: str = "automation_platform") -> logging.Logger:
     """
-    Get or create the global logger instance.
+    Get or create a logger instance with the given name.
     
     Args:
         name: Logger name (default: "automation_platform")
@@ -67,8 +63,5 @@ def get_logger(name: str = "automation_platform") -> logging.Logger:
     Returns:
         Logger instance
     """
-    global _logger
-    if _logger is None:
-        _logger = setup_logger(name)
-    return _logger
+    return setup_logger(name)
 
