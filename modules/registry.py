@@ -44,12 +44,16 @@ class ModuleRegistry:
         # Import modules
         from .nutrition import NutritionModule
         from .workout import WorkoutModule
+        from .sleep import SleepModule
+        from .health import HealthModule
         # Add more imports as you create modules
         
         # Map of module names to classes
         available_modules = {
             'nutrition': NutritionModule,
             'workout': WorkoutModule,
+            'sleep': SleepModule,
+            'health': HealthModule,
             # Add more mappings here
         }
         

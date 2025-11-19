@@ -158,12 +158,40 @@ class AutomationOrchestrator:
             True if this appears to be a summary request
         """
         transcript_lower = transcript.lower()
-        summary_keywords = [
-            'summary', 'summarize', 'show me', 'what did i', 'how was',
-            'daily summary', 'day summary', 'give me a summary',
-            'show summary', 'get summary', 'summary for', 'summary of'
+        
+        # Explicit summary keywords (high confidence)
+        explicit_summary_keywords = [
+            'summary', 'summarize', 'daily summary', 'day summary', 
+            'give me a summary', 'show summary', 'get summary', 
+            'summary for', 'summary of', 'overview'
         ]
-        return any(keyword in transcript_lower for keyword in summary_keywords)
+        
+        # Check for explicit summary requests
+        if any(keyword in transcript_lower for keyword in explicit_summary_keywords):
+            return True
+        
+        # Check for "what did i do" type requests (but not specific data queries)
+        # These are summary requests, not specific data queries
+        if 'what did i do' in transcript_lower or 'what did i' in transcript_lower:
+            # But exclude specific data queries like "what did i eat", "what are the things i ate"
+            # These should use RAG, not summary
+            exclude_patterns = [
+                'eat', 'ate', 'things i ate', 'food', 'meals', 'drank',
+                'workout', 'exercise', 'slept', 'sleep', 'weighed', 'weight',
+                'bowel', 'bm', 'electrolytes'
+            ]
+            # If it contains specific data query patterns, it's NOT a summary request
+            if any(pattern in transcript_lower for pattern in exclude_patterns):
+                return False
+            return True
+        
+        # "how was" can be summary or specific query - be conservative
+        if 'how was' in transcript_lower:
+            # Only treat as summary if it's clearly asking about the day overall
+            if 'day' in transcript_lower or 'today' in transcript_lower or 'yesterday' in transcript_lower:
+                return True
+        
+        return False
     
     def route_intent(
         self, 
@@ -314,11 +342,15 @@ class AutomationOrchestrator:
                         "Answer a question using the user's historical data and records. "
                         "Use this for analytical questions, comparisons, evaluations, or any questions that require "
                         "reasoning about relationships between data points, trends, patterns, or insights from the user's data. "
+                        "ALSO use this for questions asking for specific lists or items from the user's data, such as: "
+                        "'what are the things i ate', 'what did i eat', 'list my workouts', 'what foods did i have', "
+                        "'show me what i ate today', 'what are my meals', etc. "
                         "This tool searches through the user's logged data (nutrition, workouts, sleep, health metrics, etc.) "
                         "and provides answers based on their actual records. "
                         "Examples: 'is my sleep aligned with my workouts', 'how is my nutrition', 'tell me about my progress', "
                         "'can you tell me whether my sleep is properly aligned with my nutrition and workout', "
-                        "'what's my average protein intake', 'how has my weight changed', 'compare my sleep and workout patterns'."
+                        "'what's my average protein intake', 'how has my weight changed', 'compare my sleep and workout patterns', "
+                        "'what are the things i ate', 'what did i eat today', 'list my foods', 'what workouts did i do'."
                     ),
                     "parameters": {
                         "type": "object",
@@ -451,11 +483,15 @@ class AutomationOrchestrator:
                 "The message could be a question, a command to log data, a request for a summary, or a general query. "
                 "\n\n"
                 "AVAILABLE TOOLS:\n"
-                "- 'get_daily_summary': Use ONLY for explicit requests for summaries/overviews (e.g., 'show me my summary', 'what did I do today')\n"
-                "- 'answer_query_with_rag': Use for analytical questions, comparisons, evaluations, or questions requiring reasoning "
-                "about relationships between data points, trends, or insights from the user's historical data "
-                "(e.g., 'is my sleep aligned with workouts', 'tell me whether X is properly aligned with Y', "
-                "'how is my nutrition', 'what's my progress')\n"
+                "- 'get_daily_summary': Use ONLY for explicit requests for summaries/overviews of the entire day "
+                "(e.g., 'show me my summary', 'what did I do today', 'give me an overview'). "
+                "DO NOT use for questions asking for specific lists or items (e.g., 'what did I eat', 'what are the things I ate')\n"
+                "- 'answer_query_with_rag': Use for analytical questions, comparisons, evaluations, questions requiring reasoning "
+                "about relationships between data points, trends, or insights from the user's historical data, "
+                "OR questions asking for specific lists or items from the user's data. "
+                "Examples: 'is my sleep aligned with workouts', 'tell me whether X is properly aligned with Y', "
+                "'how is my nutrition', 'what's my progress', 'what are the things i ate', 'what did i eat today', "
+                "'list my workouts', 'what foods did i have', 'show me what i ate'.\n"
                 "- Module tools (e.g., 'nutrition_module', 'workout_module'): Use 'log' action for logging/recording data, "
                 "or 'query' action for simple questions that a specific module can answer directly\n"
                 "\n"

@@ -14,6 +14,7 @@ from typing import Dict, Callable, Optional
 import asyncio
 from datetime import date, datetime, timedelta
 import pytz
+from utils.logger import get_logger
 
 
 async def send_long_message(channel, content: str, max_length: int = 2000):
@@ -122,31 +123,17 @@ async def get_summary_for_date(registry, target_date: date, channel=None):
             # Build detailed summary text
             summary_text = data.get('summary', 'No data')
             
-            # Add sleep and bowel movements for nutrition module
-            if module_name == 'nutrition':
-                sleep = data.get('sleep', {})
-                health = data.get('health', {})
-                
-                details = []
-                if sleep.get('hours') is not None:
-                    sleep_info = f"💤 Sleep: {sleep['hours']:.1f}h"
-                    if sleep.get('score'):
-                        sleep_info += f" (score: {sleep['score']})"
-                    if sleep.get('quality'):
-                        sleep_info += f" - {sleep['quality']}"
-                    details.append(sleep_info)
-                
-                if health.get('bowel_movements', 0) > 0:
-                    details.append(f"🚽 Bowel movements: {health['bowel_movements']}")
-                
-                if health.get('weight_lbs'):
-                    details.append(f"⚖️ Weight: {health['weight_lbs']} lbs")
-                
-                if details:
-                    summary_text += "\n" + "\n".join(details)
+            # Add emoji prefix based on module type
+            emoji_map = {
+                'nutrition': '🍽️',
+                'workout': '🏋️',
+                'sleep': '💤',
+                'health': '🏥'
+            }
+            emoji = emoji_map.get(module_name, '📊')
             
             embed.add_field(
-                name=f"📊 {module_name.title()}",
+                name=f"{emoji} {module_name.title()}",
                 value=summary_text,
                 inline=False
             )
@@ -262,6 +249,50 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
                         context={"message_id": str(message.id)}
                     )
                 
+                # Log orchestrator routing decision details
+                logger = get_logger("discord_bot")
+                logger.info("=" * 80)
+                logger.info("ORCHESTRATOR ROUTING DECISION (Discord):")
+                logger.info("-" * 80)
+                logger.info(f"Message: {content[:100]}{'...' if len(content) > 100 else ''}")
+                logger.info(f"Reasoning: {routing_decision.get('reasoning', 'N/A')}")
+                
+                modules = routing_decision.get("modules", [])
+                if modules:
+                    logger.info(f"Modules Selected: {len(modules)}")
+                    for i, module in enumerate(modules, 1):
+                        logger.info(f"  {i}. {module.get('name', 'unknown')} - Action: {module.get('action', 'unknown')}, Confidence: {module.get('confidence', 0):.2f}")
+                        if module.get('reasoning'):
+                            logger.info(f"     Reasoning: {module.get('reasoning')}")
+                else:
+                    logger.info("Modules Selected: NONE (no module calls made)")
+                
+                if routing_decision.get("summary_request"):
+                    logger.info(f"Summary Request: YES (Date: {routing_decision.get('summary_date', 'N/A')})")
+                else:
+                    logger.info("Summary Request: NO")
+                
+                if routing_decision.get("needs_rag"):
+                    logger.info(f"RAG Query: YES (Query: {routing_decision.get('rag_query', 'N/A')[:100]}...)")
+                else:
+                    logger.info("RAG Query: NO")
+                
+                if routing_decision.get("out_of_scope"):
+                    logger.info("Out of Scope: YES")
+                else:
+                    logger.info("Out of Scope: NO")
+                
+                if routing_decision.get("direct_answer"):
+                    logger.info(f"Direct Answer: YES (Length: {len(routing_decision.get('direct_answer', ''))} chars)")
+                else:
+                    logger.info("Direct Answer: NO")
+                
+                if routing_decision.get("error"):
+                    logger.warning(f"Error: {routing_decision.get('error')}")
+                
+                logger.info("-" * 80)
+                logger.info("=" * 80)
+                
                 # Handle routing decision
                 if routing_decision.get("error"):
                     await message.channel.send(
@@ -368,6 +399,54 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
                     else:
                         # Single module - process normally
                         results = [await process_module(modules_to_process[0], content, message.id)]
+                
+                # Log module processing results and extracted information
+                logger.info("=" * 80)
+                logger.info("MODULE PROCESSING RESULTS (Discord):")
+                logger.info("-" * 80)
+                for i, result in enumerate(results, 1):
+                    if result is None:
+                        logger.info(f"{i}. Module result: None")
+                        continue
+                    
+                    if isinstance(result, Exception):
+                        logger.error(f"{i}. Module result: Exception - {str(result)}")
+                        continue
+                    
+                    module_name = result.get("module_name", "unknown")
+                    if result.get("type") == "error":
+                        logger.warning(f"{i}. {module_name}: ERROR - {result.get('error', 'Unknown error')}")
+                    elif result.get("type") == "log":
+                        module_result = result.get("result", {})
+                        logged_items = module_result.get("logged_items", [])
+                        
+                        logger.info(f"{i}. {module_name}: SUCCESS")
+                        if logged_items:
+                            logger.info(f"   Extracted Information ({len(logged_items)} items):")
+                            for item in logged_items:
+                                logger.info(f"     • {item}")
+                        else:
+                            # Try to get information from embed if available
+                            embed = module_result.get("embed")
+                            if embed:
+                                title = getattr(embed, 'title', 'N/A')
+                                description = getattr(embed, 'description', 'N/A')
+                                logger.info(f"   Extracted Information (from embed):")
+                                logger.info(f"     • Title: {title}")
+                                if description:
+                                    logger.info(f"     • Description: {description[:200]}{'...' if len(description) > 200 else ''}")
+                            else:
+                                message_text = module_result.get("message", "")
+                                if message_text:
+                                    logger.info(f"   Extracted Information (from message):")
+                                    logger.info(f"     • {message_text[:200]}{'...' if len(message_text) > 200 else ''}")
+                                else:
+                                    logger.info(f"   Extracted Information: None (no logged_items, embed, or message found)")
+                    elif result.get("type") == "query":
+                        logger.info(f"{i}. {module_name}: QUERY - {result.get('answer', 'N/A')[:100]}...")
+                
+                logger.info("-" * 80)
+                logger.info("=" * 80)
                 
                 # Send all results
                 for result in results:
@@ -698,16 +777,52 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
     return bot
 
 
-def send_webhook_notification(webhook_url: str, embed_data: Dict):
+def send_webhook_notification(webhook_url: str, embed_data: Dict = None, content: str = None):
     """
-    DEPRECATED: Send notification via webhook (one-way, no bot needed).
-    
-    This function is kept for backwards compatibility but is no longer used.
-    All notifications now go through the Discord bot.
+    Send notification via Discord webhook (one-way, no bot needed).
     
     Args:
-        webhook_url: Discord webhook URL (unused)
-        embed_data: Embed configuration (unused)
+        webhook_url: Discord webhook URL
+        embed_data: Embed configuration dict (title, description, color, fields, etc.)
+        content: Plain text content (optional, used if embed_data is None)
+        
+    Returns:
+        bool: True if notification was sent successfully, False otherwise
     """
-    print("⚠️  send_webhook_notification is deprecated. Use bot.send() instead.")
-    return False
+    import requests
+    
+    if not webhook_url:
+        print("⚠️  No webhook URL provided")
+        return False
+    
+    payload = {}
+    
+    if embed_data:
+        # Build embed from dict
+        embed = {
+            "title": embed_data.get("title"),
+            "description": embed_data.get("description"),
+            "color": embed_data.get("color", 0x0099ff),
+            "fields": embed_data.get("fields", []),
+            "footer": embed_data.get("footer"),
+            "timestamp": embed_data.get("timestamp")
+        }
+        # Remove None values
+        embed = {k: v for k, v in embed.items() if v is not None}
+        payload["embeds"] = [embed]
+    elif content:
+        payload["content"] = content
+    else:
+        print("⚠️  No content or embed_data provided")
+        return False
+    
+    try:
+        response = requests.post(webhook_url, json=payload, timeout=10)
+        if response.status_code == 204:
+            return True
+        else:
+            print(f"❌ Webhook notification failed: {response.status_code} - {response.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Failed to send webhook notification: {e}")
+        return False

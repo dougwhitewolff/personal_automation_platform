@@ -89,3 +89,9 @@ modules:
     calorie_thresholds:
       moderate_min: 200
       high_min: 600
+  
+  sleep:
+    enabled: true
+  
+  health:
+    enabled: true

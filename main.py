@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 from datetime import datetime, date
+from typing import Dict
 import yaml
 import asyncio
 from utils.logger import get_logger
@@ -314,6 +315,60 @@ def mark_entry_processed(db, lifelog_id: str, source: str = "limitless"):
     )
 
 
+def _build_logged_notification_message(module_result: Dict) -> Dict:
+    """
+    Build a notification message from module result showing what was logged.
+    
+    Args:
+        module_result: Module result dict containing 'result' with 'logged_items'
+        
+    Returns:
+        Dict with embed_data for webhook notification
+    """
+    result = module_result.get("result", {})
+    module_name = module_result.get("module_name", "unknown")
+    logged_items = result.get("logged_items", [])
+    
+    if not logged_items:
+        # Fallback to embed title/description if no logged_items
+        embed = result.get("embed")
+        if embed:
+            title = getattr(embed, 'title', 'Logged!')
+            description = getattr(embed, 'description', '')
+            return {
+                "title": title,
+                "description": description,
+                "color": getattr(embed, 'color', 0x00FF00)
+            }
+        return None
+    
+    # Build message from logged items
+    description = "\n".join([f"• {item}" for item in logged_items])
+    
+    # Determine emoji and color based on module
+    if module_name == "nutrition":
+        emoji = "🍽️"
+        color = 0x00FF00
+    elif module_name == "workout":
+        emoji = "🏋️"
+        color = 0x0099FF
+    elif module_name == "sleep":
+        emoji = "💤"
+        color = 0x9B59B6
+    elif module_name == "health":
+        emoji = "🏥"
+        color = 0x3498DB
+    else:
+        emoji = "✅"
+        color = 0x00FF00
+    
+    return {
+        "title": f"{emoji} Logged!",
+        "description": description,
+        "color": color
+    }
+
+
 def polling_loop(limitless_client, registry, db, orchestrator):
     """
     Poll Limitless API for new "log that" or summary requests using semantic search.
@@ -323,15 +378,20 @@ def polling_loop(limitless_client, registry, db, orchestrator):
     - Checks if entries are already processed (by lifelog_id)
     - Routes to orchestrator and processes modules
     - Marks entries as processed after successful handling
+    - Sends webhook notifications for logged items
     """
     global _discord_channel, _discord_channel_lock  # Need to access global variable
     
     logger = get_logger("polling")
     poll_interval = int(get_env("POLL_INTERVAL", "10"))  # Default 10 seconds
     timezone = get_env("TIMEZONE", "America/Los_Angeles")
+    webhook_url = get_env("DISCORD_WEBHOOK_URL")
     
     logger.info(f"Limitless polling started (every {poll_interval}s, semantic search, timezone: {timezone})")
-    logger.info("Notifications will be sent when Discord bot is ready (automatic retry)")
+    if webhook_url:
+        logger.info("Notifications will be sent via webhook")
+    else:
+        logger.warning("DISCORD_WEBHOOK_URL not set - notifications will not be sent")
     
     while True:
         try:
@@ -384,16 +444,61 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                     context={"lifelog_id": lifelog_id}
                 )
                 
+                # Log orchestrator routing decision details
+                logger.info("=" * 80)
+                logger.info("ORCHESTRATOR ROUTING DECISION:")
+                logger.info("-" * 80)
+                logger.info(f"Reasoning: {routing_decision.get('reasoning', 'N/A')}")
+                
+                modules = routing_decision.get("modules", [])
+                if modules:
+                    logger.info(f"Modules Selected: {len(modules)}")
+                    for i, module in enumerate(modules, 1):
+                        logger.info(f"  {i}. {module.get('name', 'unknown')} - Action: {module.get('action', 'unknown')}, Confidence: {module.get('confidence', 0):.2f}")
+                        if module.get('reasoning'):
+                            logger.info(f"     Reasoning: {module.get('reasoning')}")
+                else:
+                    logger.info("Modules Selected: NONE (no module calls made)")
+                
+                if routing_decision.get("summary_request"):
+                    logger.info(f"Summary Request: YES (Date: {routing_decision.get('summary_date', 'N/A')})")
+                else:
+                    logger.info("Summary Request: NO")
+                
+                if routing_decision.get("needs_rag"):
+                    logger.info(f"RAG Query: YES (Query: {routing_decision.get('rag_query', 'N/A')[:100]}...)")
+                else:
+                    logger.info("RAG Query: NO")
+                
+                if routing_decision.get("out_of_scope"):
+                    logger.info("Out of Scope: YES")
+                else:
+                    logger.info("Out of Scope: NO")
+                
+                if routing_decision.get("direct_answer"):
+                    logger.info(f"Direct Answer: YES (Length: {len(routing_decision.get('direct_answer', ''))} chars)")
+                else:
+                    logger.info("Direct Answer: NO")
+                
+                if routing_decision.get("error"):
+                    logger.warning(f"Error: {routing_decision.get('error')}")
+                
+                logger.info("-" * 80)
+                logger.info("=" * 80)
+                
                 # Handle routing decision
                 if routing_decision.get("error"):
                     logger.error(f"Orchestrator error for entry {lifelog_id}: {routing_decision['error']}")
-                    import discord
-                    error_embed = discord.Embed(
-                        title="❌ Routing Error",
-                        description=f"Failed to route entry: {routing_decision['error']}",
-                        color=0xFF0000
-                    )
-                    await_sync(send_limitless_notification(embed=error_embed))
+                    if webhook_url:
+                        from core.discord_bot import send_webhook_notification
+                        send_webhook_notification(
+                            webhook_url,
+                            embed_data={
+                                "title": "❌ Routing Error",
+                                "description": f"Failed to route entry: {routing_decision['error']}",
+                                "color": 0xFF0000
+                            }
+                        )
                     mark_entry_processed(db, lifelog_id)  # Mark as processed even on error
                     continue
                 
@@ -406,11 +511,31 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                     answer = orchestrator.answer_query_with_rag(rag_query)
                     logger.info(f"✓ RAG query answered (response length: {len(answer)} chars)")
                     
-                    import discord
-                    # Split long answers into multiple embeds if needed
-                    embeds = _create_embeds_from_long_content(answer, title="💬 Answer", color=0x0099ff)
-                    for embed in embeds:
-                        send_limitless_notification(embed=embed)
+                    if webhook_url:
+                        from core.discord_bot import send_webhook_notification
+                        # Split long answers into multiple embeds if needed
+                        if len(answer) <= 4096:
+                            send_webhook_notification(
+                                webhook_url,
+                                embed_data={
+                                    "title": "💬 Answer",
+                                    "description": answer,
+                                    "color": 0x0099ff
+                                }
+                            )
+                        else:
+                            # Split into chunks
+                            chunks = [answer[i:i+4096] for i in range(0, len(answer), 4096)]
+                            for i, chunk in enumerate(chunks):
+                                title = "💬 Answer" if i == 0 else f"💬 Answer (Part {i+1})"
+                                send_webhook_notification(
+                                    webhook_url,
+                                    embed_data={
+                                        "title": title,
+                                        "description": chunk,
+                                        "color": 0x0099ff
+                                    }
+                                )
                     mark_entry_processed(db, lifelog_id)
                     continue
                 
@@ -425,11 +550,33 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                         target_date = datetime.now(tz).date()
                     logger.info(f"Summary request detected for {target_date.isoformat()}")
                     
-                    from core.discord_bot import get_summary_for_date
-                    summary_embed = await_sync(get_summary_for_date(registry, target_date, channel=None))
-                    
-                    if summary_embed:
-                        send_limitless_notification(embed=summary_embed)
+                    if webhook_url:
+                        from core.discord_bot import get_summary_for_date, send_webhook_notification
+                        summary_embed = await_sync(get_summary_for_date(registry, target_date, channel=None))
+                        
+                        if summary_embed:
+                            # Convert Discord embed to dict for webhook
+                            # Handle color - can be int or Color object
+                            color = summary_embed.color
+                            if hasattr(color, 'value'):
+                                color = color.value
+                            elif color is None:
+                                color = 0x00ff00  # Default green
+                            
+                            embed_dict = {
+                                "title": summary_embed.title,
+                                "description": summary_embed.description,
+                                "color": color,
+                                "fields": [
+                                    {
+                                        "name": field.name,
+                                        "value": field.value,
+                                        "inline": field.inline
+                                    }
+                                    for field in summary_embed.fields
+                                ]
+                            }
+                            send_webhook_notification(webhook_url, embed_data=embed_dict)
                     
                     mark_entry_processed(db, lifelog_id)
                     continue
@@ -437,13 +584,16 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                 # Handle out of scope
                 if routing_decision.get("out_of_scope") or not routing_decision.get("modules"):
                     logger.info(f"Entry {lifelog_id} is out of scope or no modules matched")
-                    import discord
-                    info_embed = discord.Embed(
-                        title="ℹ️ No Action Taken",
-                        description=f"Entry detected but no matching modules found.\n\nReasoning: {routing_decision.get('reasoning', 'Unknown')}",
-                        color=0xFFFF00
-                    )
-                    send_limitless_notification(embed=info_embed)
+                    if webhook_url:
+                        from core.discord_bot import send_webhook_notification
+                        send_webhook_notification(
+                            webhook_url,
+                            embed_data={
+                                "title": "ℹ️ No Action Taken",
+                                "description": f"Entry detected but no matching modules found.\n\nReasoning: {routing_decision.get('reasoning', 'Unknown')}",
+                                "color": 0xFFFF00
+                            }
+                        )
                     mark_entry_processed(db, lifelog_id)
                     continue
                 
@@ -514,19 +664,62 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                     )
                     module_results = [result] if result else []
                 
-                # Send Discord notifications and mark as processed
-                processed_successfully = False
-                for module_result in module_results:
+                # Log module processing results and extracted information
+                logger.info("=" * 80)
+                logger.info("MODULE PROCESSING RESULTS:")
+                logger.info("-" * 80)
+                for i, module_result in enumerate(module_results, 1):
                     if module_result is None or isinstance(module_result, Exception):
+                        logger.info(f"{i}. Module result: None or Exception")
                         continue
                     
+                    module_name = module_result.get("module_name", "unknown")
                     if module_result.get("error"):
+                        logger.warning(f"{i}. {module_name}: ERROR - {module_result.get('error')}")
                         continue
                     
-                    result = module_result.get("result")
-                    if result and result.get("embed"):
-                        send_limitless_notification(embed=result["embed"])
-                        processed_successfully = True
+                    result = module_result.get("result", {})
+                    logged_items = result.get("logged_items", [])
+                    
+                    logger.info(f"{i}. {module_name}: SUCCESS")
+                    if logged_items:
+                        logger.info(f"   Extracted Information ({len(logged_items)} items):")
+                        for item in logged_items:
+                            logger.info(f"     • {item}")
+                    else:
+                        # Try to get information from embed if available
+                        embed = result.get("embed")
+                        if embed:
+                            title = getattr(embed, 'title', 'N/A')
+                            description = getattr(embed, 'description', 'N/A')
+                            logger.info(f"   Extracted Information (from embed):")
+                            logger.info(f"     • Title: {title}")
+                            if description:
+                                logger.info(f"     • Description: {description[:200]}{'...' if len(description) > 200 else ''}")
+                        else:
+                            logger.info(f"   Extracted Information: None (no logged_items or embed found)")
+                
+                logger.info("-" * 80)
+                logger.info("=" * 80)
+                
+                # Send webhook notifications and mark as processed
+                processed_successfully = False
+                if webhook_url:
+                    from core.discord_bot import send_webhook_notification
+                    
+                    for module_result in module_results:
+                        if module_result is None or isinstance(module_result, Exception):
+                            continue
+                        
+                        if module_result.get("error"):
+                            continue
+                        
+                        # Build notification message showing what was logged
+                        notification_data = _build_logged_notification_message(module_result)
+                        if notification_data:
+                            send_webhook_notification(webhook_url, embed_data=notification_data)
+                            processed_successfully = True
+                            logger.info(f"✓ Sent webhook notification for {module_result.get('module_name', 'unknown')} module")
                 
                 # Mark as processed after successful handling
                 if processed_successfully:

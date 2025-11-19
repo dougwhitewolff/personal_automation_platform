@@ -111,8 +111,25 @@ Respond with ONLY valid JSON:
         
         # Create confirmation embed
         embed = self._create_exercise_embed(exercise, needs_electrolytes)
+        
+        # Build what was logged for notifications
+        logged_items = []
+        exercise_type = exercise.get("type", "unknown")
+        duration = exercise.get("duration_minutes") or 0
+        calories = exercise.get("calories_burned")
+        
+        logged_items.append(f"{exercise_type.title()} - {duration} min")
+        if calories:
+            logged_items.append(f"{calories} calories")
+        
         self.logger.info(f"✓ Successfully processed workout log for lifelog_id: {lifelog_id}")
-        return {"embed": embed}
+        return {
+            "embed": embed,
+            "logged_items": logged_items,
+            "logged_data": {
+                "exercise": exercise
+            }
+        }
     
     async def handle_image(self, image_bytes: bytes, context: str) -> Dict:
         """Extract Peloton stats from screenshot"""
@@ -188,7 +205,22 @@ If any field is not visible, use null."""
         )
         
         embed = self._create_peloton_embed(analysis, needs_electrolytes)
-        return {"needs_confirmation": False, "embed": embed}
+        
+        # Build what was logged for notifications
+        logged_items = []
+        ride_name = analysis.get('ride_name', 'Ride')
+        logged_items.append(f"Peloton: {ride_name} - {duration_minutes} min")
+        if calories:
+            logged_items.append(f"{calories} calories")
+        
+        return {
+            "needs_confirmation": False,
+            "embed": embed,
+            "logged_items": logged_items,
+            "logged_data": {
+                "exercise": exercise_data["exercise"]
+            }
+        }
     
     def get_scheduled_tasks(self) -> List[Dict]:
         """Workout module does not schedule reminders directly."""

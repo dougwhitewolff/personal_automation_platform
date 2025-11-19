@@ -5,8 +5,6 @@ Features:
 - Food logging with custom recipe database
 - Macro tracking with dynamic targets
 - Hydration logging
-- Sleep tracking
-- Health markers (weight, bowel movements, supplements)
 - Wellness scores (mood, energy, stress)
 - Daily summaries
 - Image analysis for restaurant meals
@@ -31,11 +29,7 @@ class NutritionModule(BaseModule):
             'check macros', 'macro check', 'nutrition summary',
             'what should i eat', 'meal ideas', 'dinner ideas',
             'drank', 'water', 'hydration',
-            'slept', 'sleep', 'woke up',
-            'weighed', 'weight',
-            'took supplements', 'took electrolytes',
-            'feeling', 'mood', 'energy', 'stress',
-            'bowel movement'
+            'feeling', 'mood', 'energy', 'stress'
         ]
     
     def get_question_patterns(self) -> List[str]:
@@ -49,7 +43,6 @@ class NutritionModule(BaseModule):
                 r'did i (hit|reach|meet)',
                 r'(macro|nutrition|food) (summary|totals|check)',
                 r'how (much|many).*water',
-                r'did i.*sleep',
                 r'suggest.*lunch',
                 r'recommend.*dinner'
             ]
@@ -69,16 +62,6 @@ class NutritionModule(BaseModule):
         hydration_logs = self.db["hydration_logs"]
         hydration_logs.create_index([("date", 1), ("timestamp", 1)])
         hydration_logs.create_index("lifelog_id")
-        
-        # Sleep logs
-        sleep_logs = self.db["sleep_logs"]
-        sleep_logs.create_index("date", unique=True)
-        sleep_logs.create_index("lifelog_id")
-        
-        # Daily health markers
-        daily_health = self.db["daily_health"]
-        daily_health.create_index("date", unique=True)
-        daily_health.create_index("lifelog_id")
         
         # Wellness scores
         wellness_scores = self.db["wellness_scores"]
@@ -148,17 +131,13 @@ class NutritionModule(BaseModule):
         # Store all detected data
         foods = analysis.get('foods_consumed', [])
         hydration = analysis.get('hydration', {})
-        sleep = analysis.get('sleep', {})
-        health = analysis.get('health_markers', {})
         wellness = analysis.get('wellness', {})
         
         self.logger.info(f"Detected: {len(foods)} foods, hydration={hydration.get('detected', False)}, "
-                        f"sleep={sleep.get('detected', False)}, health_markers={bool(health)}, wellness={bool(wellness)}")
+                        f"wellness={bool(wellness)}")
         
         self._store_foods(foods, lifelog_id)
         self._store_hydration(hydration, lifelog_id)
-        self._store_sleep(sleep, lifelog_id)
-        self._store_health_markers(health, lifelog_id)
         self._store_wellness(wellness, lifelog_id)
         
         # Get updated summary
@@ -167,8 +146,30 @@ class NutritionModule(BaseModule):
         # Create confirmation embed
         embed = self._create_log_confirmation_embed(summary)
         
+        # Build what was logged for notifications
+        logged_items = []
+        if foods:
+            food_names = [f.get('item', 'Unknown') for f in foods]
+            logged_items.append(f"Food: {', '.join(food_names)}")
+        if hydration.get('detected') and hydration.get('entries'):
+            total_oz = sum(e.get('amount_oz', 0) for e in hydration.get('entries', []))
+            logged_items.append(f"Hydration: {total_oz}oz")
+        if wellness:
+            if wellness.get('mood'):
+                logged_items.append(f"Mood: {wellness['mood']}")
+            if wellness.get('energy_score') is not None:
+                logged_items.append(f"Energy: {wellness['energy_score']}/10")
+        
         self.logger.info(f"✓ Successfully processed nutrition log for lifelog_id: {lifelog_id}")
-        return {'embed': embed}
+        return {
+            'embed': embed,
+            'logged_items': logged_items,
+            'logged_data': {
+                'foods': foods,
+                'hydration': hydration,
+                'wellness': wellness
+            }
+        }
     
     async def handle_image(self, image_bytes: bytes, context: str) -> Dict:
         """Analyze food plate images"""
@@ -308,8 +309,6 @@ Respond with ONLY valid JSON:
             }}}}
         ],
         "hydration": {{{{"detected": true/false, "entries": [{{{{"amount_oz": 16}}}}]}}}},
-        "sleep": {{{{"detected": true/false, "hours": 7.5, "sleep_score": 85, "quality": "good/poor/restless"}}}},
-        "health_markers": {{{{"weight_lbs": null, "bowel_movements": 0, "electrolytes_taken": true/false}}}},
         "wellness": {{{{"mood": "good", "stress_level": 0-5, "energy_score": 0-10}}}}
         }}}}"""
     
@@ -384,101 +383,6 @@ Respond with ONLY valid JSON:
                 doc["_id"] = result.inserted_ids[i]
                 self._vectorize_record(doc, "hydration_logs")
     
-    def _store_sleep(self, sleep: Dict, lifelog_id: str):
-        """Store sleep logs"""
-        if not sleep.get('detected'):
-            self.logger.debug("No sleep detected")
-            return
-        
-        hours = sleep.get('hours', 0)
-        score = sleep.get('sleep_score')
-        quality = sleep.get('quality')
-        self.logger.info(f"Storing sleep: {hours:.1f} hours, score={score}, quality={quality}")
-        
-        sleep_logs_collection = self.db["sleep_logs"]
-        today = self.get_today_in_timezone()
-        now = self.get_now_in_timezone()
-        
-        sleep_logs_collection.update_one(
-            {"date": today.isoformat()},
-            {
-                "$set": {
-                    "date": today.isoformat(),
-                    "hours": sleep['hours'],
-                    "sleep_score": sleep.get('sleep_score'),
-                    "quality_notes": sleep.get('quality'),
-                    "lifelog_id": lifelog_id,
-                    "created_at": now
-                }
-            },
-            upsert=True
-        )
-        self.logger.info(f"✓ Stored sleep log in MongoDB (date: {today.isoformat()})")
-        # Vectorize the sleep record (fetch it after upsert)
-        # Delete existing vectors first since this is an upsert operation
-        sleep_record = sleep_logs_collection.find_one({"date": today.isoformat()})
-        if sleep_record:
-            self._vectorize_record(sleep_record, "sleep_logs", delete_existing=True)
-    
-    def _store_health_markers(self, health: Dict, lifelog_id: str):
-        """Store health markers"""
-        if not any(health.values()):
-            self.logger.debug("No health markers to store")
-            return
-        
-        weight = health.get('weight_lbs')
-        bm = health.get('bowel_movements', 0)
-        electrolytes = health.get('electrolytes_taken')
-        self.logger.info(f"Storing health markers: weight={weight} lbs, "
-                        f"bowel_movements={bm}, electrolytes={electrolytes}")
-        
-        daily_health_collection = self.db["daily_health"]
-        today = self.get_today_in_timezone()
-        now = self.get_now_in_timezone()
-        
-        # Get existing document if it exists
-        existing = daily_health_collection.find_one({"date": today.isoformat()})
-        
-        update_data = {
-            "date": today.isoformat(),
-            "lifelog_id": lifelog_id,
-            "created_at": now
-        }
-        
-        # Update weight if provided
-        if health.get('weight_lbs') is not None:
-            update_data["weight_lbs"] = health.get('weight_lbs')
-        elif existing:
-            update_data["weight_lbs"] = existing.get('weight_lbs')
-        
-        # Increment bowel movements
-        if health.get('bowel_movements', 0) > 0:
-            update_data["bowel_movements"] = (existing.get('bowel_movements', 0) if existing else 0) + health.get('bowel_movements', 0)
-        elif existing:
-            update_data["bowel_movements"] = existing.get('bowel_movements', 0)
-        else:
-            update_data["bowel_movements"] = 0
-        
-        # Update electrolytes
-        if health.get('electrolytes_taken') is not None:
-            update_data["electrolytes_taken"] = health.get('electrolytes_taken') or (existing.get('electrolytes_taken', False) if existing else False)
-        elif existing:
-            update_data["electrolytes_taken"] = existing.get('electrolytes_taken', False)
-        else:
-            update_data["electrolytes_taken"] = False
-        
-        daily_health_collection.update_one(
-            {"date": today.isoformat()},
-            {"$set": update_data},
-            upsert=True
-        )
-        self.logger.info(f"✓ Stored health markers in MongoDB (date: {today.isoformat()})")
-        # Vectorize the health record (fetch it after upsert)
-        # Delete existing vectors first since this is an upsert operation
-        health_record = daily_health_collection.find_one({"date": today.isoformat()})
-        if health_record:
-            self._vectorize_record(health_record, "daily_health", delete_existing=True)
-    
     def _store_wellness(self, wellness: Dict, lifelog_id: str):
         """Store wellness scores"""
         if not any(v is not None for v in wellness.values()):
@@ -547,19 +451,6 @@ Respond with ONLY valid JSON:
         hydration_result = list(hydration_logs_collection.aggregate(hydration_pipeline))
         water = hydration_result[0].get("total_oz", 0) if hydration_result else 0
         
-        # Sleep data
-        sleep_logs_collection = self.db["sleep_logs"]
-        sleep_data = sleep_logs_collection.find_one({"date": date_str})
-        sleep_hours = sleep_data.get("hours") if sleep_data else None
-        sleep_score = sleep_data.get("sleep_score") if sleep_data else None
-        sleep_quality = sleep_data.get("quality_notes") if sleep_data else None
-        
-        # Health markers (bowel movements, weight)
-        daily_health_collection = self.db["daily_health"]
-        health_data = daily_health_collection.find_one({"date": date_str})
-        bowel_movements = health_data.get("bowel_movements", 0) if health_data else 0
-        weight_lbs = health_data.get("weight_lbs") if health_data else None
-        
         # Get targets (need to calculate based on training day)
         targets = self._calculate_targets(date_obj)
         
@@ -575,10 +466,6 @@ Respond with ONLY valid JSON:
         
         # Build summary text
         summary_parts = [f"{totals[0]:.0f} cal, {totals[1]:.0f}g protein, {totals[2]:.0f}g carbs"]
-        if sleep_hours is not None:
-            summary_parts.append(f"{sleep_hours:.1f}h sleep")
-        if bowel_movements > 0:
-            summary_parts.append(f"{bowel_movements} BM")
         
         return {
             'totals': {
@@ -591,15 +478,6 @@ Respond with ONLY valid JSON:
             },
             'targets': targets,
             'remaining': remaining,
-            'sleep': {
-                'hours': sleep_hours,
-                'score': sleep_score,
-                'quality': sleep_quality
-            },
-            'health': {
-                'bowel_movements': bowel_movements,
-                'weight_lbs': weight_lbs
-            },
             'summary': ", ".join(summary_parts)
         }
     
