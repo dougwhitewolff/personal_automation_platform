@@ -1,11 +1,10 @@
 """
-Nutrition Module - Food, macro, and hydration tracking.
+Nutrition Module - Food and macro tracking.
 
 Features:
 - Food logging with custom recipe database
 - Macro tracking with dynamic targets
-- Hydration logging
-- Wellness scores (mood, energy, stress)
+- Hydration/water logging (stored in hydration_logs collection)
 - Daily summaries
 - Image analysis for restaurant meals
 """
@@ -18,7 +17,7 @@ import json
 
 
 class NutritionModule(BaseModule):
-    """Comprehensive nutrition and health tracking"""
+    """Food and macro tracking with hydration logging"""
     
     def get_name(self) -> str:
         return "nutrition"
@@ -28,8 +27,7 @@ class NutritionModule(BaseModule):
             'log that', 'log this', 'track this', 'track that',
             'check macros', 'macro check', 'nutrition summary',
             'what should i eat', 'meal ideas', 'dinner ideas',
-            'drank', 'water', 'hydration',
-            'feeling', 'mood', 'energy', 'stress'
+            'drank', 'water', 'hydration'
         ]
     
     def get_question_patterns(self) -> List[str]:
@@ -62,11 +60,6 @@ class NutritionModule(BaseModule):
         hydration_logs = self.db["hydration_logs"]
         hydration_logs.create_index([("date", 1), ("timestamp", 1)])
         hydration_logs.create_index("lifelog_id")
-        
-        # Wellness scores
-        wellness_scores = self.db["wellness_scores"]
-        wellness_scores.create_index([("date", 1), ("timestamp", 1)])
-        wellness_scores.create_index("lifelog_id")
         
         # Load custom foods from config
         self._load_custom_foods()
@@ -131,14 +124,11 @@ class NutritionModule(BaseModule):
         # Store all detected data
         foods = analysis.get('foods_consumed', [])
         hydration = analysis.get('hydration', {})
-        wellness = analysis.get('wellness', {})
         
-        self.logger.info(f"Detected: {len(foods)} foods, hydration={hydration.get('detected', False)}, "
-                        f"wellness={bool(wellness)}")
+        self.logger.info(f"Detected: {len(foods)} foods, hydration={hydration.get('detected', False)}")
         
         self._store_foods(foods, lifelog_id)
         self._store_hydration(hydration, lifelog_id)
-        self._store_wellness(wellness, lifelog_id)
         
         # Get updated summary
         summary = self._get_daily_summary_internal(self.get_today_in_timezone())
@@ -154,11 +144,6 @@ class NutritionModule(BaseModule):
         if hydration.get('detected') and hydration.get('entries'):
             total_oz = sum(e.get('amount_oz', 0) for e in hydration.get('entries', []))
             logged_items.append(f"Hydration: {total_oz}oz")
-        if wellness:
-            if wellness.get('mood'):
-                logged_items.append(f"Mood: {wellness['mood']}")
-            if wellness.get('energy_score') is not None:
-                logged_items.append(f"Energy: {wellness['energy_score']}/10")
         
         self.logger.info(f"✓ Successfully processed nutrition log for lifelog_id: {lifelog_id}")
         return {
@@ -166,8 +151,7 @@ class NutritionModule(BaseModule):
             'logged_items': logged_items,
             'logged_data': {
                 'foods': foods,
-                'hydration': hydration,
-                'wellness': wellness
+                'hydration': hydration
             }
         }
     
@@ -279,7 +263,7 @@ Respond with ONLY valid JSON:
     
     def _build_analysis_prompt(self, custom_context: str) -> str:
         """Build comprehensive analysis prompt"""
-        return f"""Extract ALL relevant health and nutrition data from this transcript.
+        return f"""Extract food and hydration data from this transcript.
 
         {custom_context}
 
@@ -289,6 +273,9 @@ Respond with ONLY valid JSON:
         - NEVER leave calories, protein, carbs, fat, or fiber as 0 unless the food truly has none
         - For common foods (banana, apple, chicken, etc.), use standard serving size estimates
         - Always provide realistic nutrition estimates for any food item
+        - WATER/HYDRATION: If the user mentions drinking water, water bottles, hydration, or any liquid that is plain water (not juice, coffee, etc.), 
+          set hydration.detected=true and include the amount in ounces. Do NOT include water as a food item.
+        - Only include actual food items in foods_consumed. Water, plain water, hydration drinks (if just water), etc. should go in hydration, not foods_consumed.
 
         TRANSCRIPT:
         {{transcript}}
@@ -308,8 +295,7 @@ Respond with ONLY valid JSON:
             "custom_food_name": "smoothie_small" or null
             }}}}
         ],
-        "hydration": {{{{"detected": true/false, "entries": [{{{{"amount_oz": 16}}}}]}}}},
-        "wellness": {{{{"mood": "good", "stress_level": 0-5, "energy_score": 0-10}}}}
+        "hydration": {{{{"detected": true/false, "entries": [{{{{"amount_oz": 16}}}}]}}}}
         }}}}"""
     
     def _store_foods(self, foods: List[Dict], lifelog_id: str):
@@ -382,36 +368,6 @@ Respond with ONLY valid JSON:
             for i, doc in enumerate(documents):
                 doc["_id"] = result.inserted_ids[i]
                 self._vectorize_record(doc, "hydration_logs")
-    
-    def _store_wellness(self, wellness: Dict, lifelog_id: str):
-        """Store wellness scores"""
-        if not any(v is not None for v in wellness.values()):
-            self.logger.debug("No wellness scores to store")
-            return
-        
-        self.logger.info(f"Storing wellness scores: mood={wellness.get('mood')}, "
-                        f"stress={wellness.get('stress_level')}, energy={wellness.get('energy_score')}")
-        
-        wellness_scores_collection = self.db["wellness_scores"]
-        today = self.get_today_in_timezone()
-        now = self.get_now_in_timezone()
-        
-        result = wellness_scores_collection.insert_one({
-            "date": today.isoformat(),
-            "timestamp": now.isoformat(),
-            "mood": wellness.get('mood'),
-            "stress_level": wellness.get('stress_level'),
-            "hunger_score": wellness.get('hunger_score'),
-            "energy_score": wellness.get('energy_score'),
-            "soreness_score": wellness.get('soreness_score'),
-            "lifelog_id": lifelog_id,
-            "created_at": now
-        })
-        self.logger.info(f"✓ Stored wellness scores in MongoDB")
-        # Vectorize the wellness record
-        wellness_record = wellness_scores_collection.find_one({"_id": result.inserted_id})
-        if wellness_record:
-            self._vectorize_record(wellness_record, "wellness_scores")
     
     def _get_daily_summary_internal(self, date_obj: date) -> Dict:
         """Calculate daily totals and progress"""

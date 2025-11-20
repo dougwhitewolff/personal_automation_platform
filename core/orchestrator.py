@@ -466,47 +466,54 @@ class AutomationOrchestrator:
             Routing decision dict
         """
         # Build system prompt based on source
+        # For Limitless, filter tools to only include module logging tools (no summary, no RAG)
+        tools_to_use = tools
         if source == "limitless":
+            tools_to_use = [tool for tool in tools if tool.get("function", {}).get("name", "").endswith("_module")]
+            
             system_prompt = (
-                                """
-                    You are an intent classification system for a personal automation platform.
+                """
+You are a strict intent classification system for logging actions from Limitless Pendant lifelogs.
 
-                    Follow these rules EXACTLY when analyzing a transcript:
+CRITICAL RULES - Follow these EXACTLY:
 
-                    1. Extract a loggable event ONLY if the user describes a measurable, physical action that actually occurred, such as:
-                        - food eaten
-                        - water consumed
-                        - supplements taken
-                        - sleep duration actually completed
-                        - workout actually completed
-                        - health metrics actually observed (HR, weight, blood pressure)
-                    Ignore conversations about sleep, workouts, metrics, or UI issues that do not describe an action.
+1. ONLY process if "log that" (or "log this") is explicitly present in the transcript.
+   - If "log that" is NOT present, return NO FUNCTION CALL.
+   - "Log that" must be a direct command, not part of a question or discussion.
 
-                    2. Always IGNORE:
-                        - discussions about debugging
-                        - questions about the interface or UI
-                        - mentions of “sleep,” “water,” “food,” etc. that are NOT describing an action
-                        - questions like “why does it show eight hours of sleep?”
+2. IGNORE all non-actionable content:
+   - Markdown formatting, headers, timestamps, metadata
+   - Questions, discussions, or conversations
+   - UI/system messages, error messages, debugging info
+   - Past tense references that are not describing a completed action
+   - Mentions of food/sleep/workouts that are NOT describing something the user just did
+   - Questions like "what did I eat?", "how much did I sleep?", "why does it show X?"
+   - General observations or thoughts without a clear action
 
-                    3. If the user says “log that,” it ALWAYS refers to the most recent user-described physical action in the transcript.
-                        - If NO action was described recently, DO NOT log anything.
+3. ONLY extract loggable events that describe a COMPLETED, MEASURABLE action:
+   - Food items actually consumed (e.g., "I had a smoothie", "ate chicken and rice")
+   - Water/hydration actually consumed (e.g., "drank 16oz of water", "had a water bottle")
+   - Sleep duration actually completed (e.g., "slept 7 hours", "got 8 hours of sleep")
+   - Workouts actually completed (e.g., "did a 30 minute bike ride", "finished a workout")
+   - Health metrics actually observed/measured (e.g., "weighed 180 lbs", "heart rate was 120", "had a bowel movement")
 
-                    4. Do NOT classify based only on keywords.
-                        - You MUST ensure the statement reflects actual, completed user behavior.
+4. "Log that" MUST refer to a clear, recent action described in the transcript:
+   - The action must be described BEFORE "log that"
+   - If no clear action is described, return NO FUNCTION CALL
+   - Do NOT infer or guess what the user meant
 
-                    5. When outputting your decision, select from the following (could be multiple):
-                        - nutrition_module (log)
-                        - sleep_module (log)
-                        - workout_module (log)
-                        - health_module (log)
-                        - get_daily_summary
-                        - answer_query_with_rag
-                        - or NO FUNCTION CALL if nothing actionable is present.
+5. Available modules (use "log" action only):
+   - nutrition_module: For food items and water/hydration
+   - sleep_module: For sleep duration
+   - workout_module: For exercise/workouts
+   - health_module: For health metrics (weight, heart rate, bowel movements, etc.)
 
-                    6. If uncertain, select NO modules or tools.
+6. If uncertain, ambiguous, or no clear action is present, return NO FUNCTION CALL.
 
-                    """
+7. Do NOT use summary or query tools - Limitless is ONLY for logging actions.
 
+Focus ONLY on extracting clear, completed actions that the user explicitly wants to log.
+"""
             )
         else:  # discord
             system_prompt = (
@@ -536,6 +543,10 @@ class AutomationOrchestrator:
         user_prompt = f"User message/transcript:\n\n{transcript}"
         
         try:
+            # For Limitless, use "auto" but with filtered tools (only logging modules)
+            # For Discord, use "auto" with all tools
+            tool_choice_setting = "auto"
+            
             # Call OpenAI with function calling
             response = self.openai_client.client.chat.completions.create(
                 model="gpt-5.1",  # Use more capable model for routing
@@ -543,8 +554,8 @@ class AutomationOrchestrator:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                tools=tools,
-                tool_choice="auto",  # Let model decide which tools to call
+                tools=tools_to_use,
+                tool_choice=tool_choice_setting,
                 max_completion_tokens=1000
             )
             

@@ -400,7 +400,7 @@ def polling_loop(limitless_client, registry, db, orchestrator):
             # API returns entries in descending order (newest first), limit 3
             logger.debug("Searching Limitless API for new entries...")
             entries = limitless_client.search_lifelogs(
-                query="log that or summary request",
+                query="log that",
                 limit=3,
                 timezone=timezone,
                 direction="desc"

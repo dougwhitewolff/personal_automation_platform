@@ -10,7 +10,7 @@ Handles:
 
 import discord
 from discord.ext import commands
-from typing import Dict, Callable, Optional
+from typing import Dict, Callable, Optional, List
 import asyncio
 from datetime import date, datetime, timedelta
 import pytz
@@ -169,6 +169,8 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
     pending_confirmations = {}
     # Store pending module selections (for image routing)
     pending_module_selections = {}
+    # Store pending delete confirmations
+    pending_delete_confirmations = {}
     
     @bot.event
     async def on_ready():
@@ -658,7 +660,142 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
             
             return
         
-        # Check for confirmation reactions
+        # Check for delete confirmations first
+        if message_id in pending_delete_confirmations:
+            delete_conf = pending_delete_confirmations[message_id]
+            ctx = delete_conf['ctx']
+            
+            if str(reaction.emoji) == '✅':
+                # Confirmed - execute deletion
+                try:
+                    async with ctx.channel.typing():
+                        # Get RAG service if available
+                        rag_service = None
+                        if orchestrator and hasattr(orchestrator, 'rag_service'):
+                            rag_service = orchestrator.rag_service
+                        
+                        if delete_conf['type'] == 'table_all':
+                            # Delete all records from table
+                            result = await delete_records(
+                                delete_conf['table_name'],
+                                {},
+                                rag_service
+                            )
+                            if result['success']:
+                                embed = discord.Embed(
+                                    title="✅ Deletion Complete",
+                                    description=result['message'],
+                                    color=0x00ff00
+                                )
+                            else:
+                                embed = discord.Embed(
+                                    title="❌ Deletion Failed",
+                                    description=result['message'],
+                                    color=0xff0000
+                                )
+                            await ctx.send(embed=embed)
+                        
+                        elif delete_conf['type'] == 'table_date':
+                            # Delete records from table for specific date
+                            result = await delete_records(
+                                delete_conf['table_name'],
+                                {"date": delete_conf['date'].isoformat()},
+                                rag_service
+                            )
+                            if result['success']:
+                                embed = discord.Embed(
+                                    title="✅ Deletion Complete",
+                                    description=result['message'],
+                                    color=0x00ff00
+                                )
+                            else:
+                                embed = discord.Embed(
+                                    title="❌ Deletion Failed",
+                                    description=result['message'],
+                                    color=0xff0000
+                                )
+                            await ctx.send(embed=embed)
+                        
+                        elif delete_conf['type'] == 'table_item_date':
+                            # Delete records by item name for a specific date
+                            import re
+                            field_name = delete_conf['field_name']
+                            item_name = delete_conf['item_name']
+                            target_date = delete_conf['date']
+                            query = {
+                                field_name: {"$regex": f"^{re.escape(item_name)}$", "$options": "i"},
+                                "date": target_date.isoformat()
+                            }
+                            
+                            result = await delete_records(
+                                delete_conf['table_name'],
+                                query,
+                                rag_service
+                            )
+                            if result['success']:
+                                embed = discord.Embed(
+                                    title="✅ Deletion Complete",
+                                    description=result['message'],
+                                    color=0x00ff00
+                                )
+                            else:
+                                embed = discord.Embed(
+                                    title="❌ Deletion Failed",
+                                    description=result['message'],
+                                    color=0xff0000
+                                )
+                            await ctx.send(embed=embed)
+                        
+                        elif delete_conf['type'] == 'date_all':
+                            # Delete all records for all tables on a date
+                            collections = get_available_collections()
+                            total_deleted = 0
+                            results = []
+                            
+                            for table_name in collections:
+                                result = await delete_records(
+                                    table_name,
+                                    {"date": delete_conf['date'].isoformat()},
+                                    rag_service
+                                )
+                                if result['success'] and result['deleted_count'] > 0:
+                                    total_deleted += result['deleted_count']
+                                    results.append(f"• `{table_name}`: {result['deleted_count']} record(s)")
+                            
+                            if total_deleted > 0:
+                                embed = discord.Embed(
+                                    title="✅ Deletion Complete",
+                                    description=(
+                                        f"Successfully deleted **{total_deleted}** record(s) "
+                                        f"for {delete_conf['date'].strftime('%B %d, %Y')}.\n\n"
+                                        f"**Breakdown:**\n" + "\n".join(results)
+                                    ),
+                                    color=0x00ff00
+                                )
+                            else:
+                                embed = discord.Embed(
+                                    title="ℹ️ No Records Found",
+                                    description=f"No records found to delete for {delete_conf['date'].isoformat()}",
+                                    color=0x0099ff
+                                )
+                            await ctx.send(embed=embed)
+                    
+                    del pending_delete_confirmations[message_id]
+                    
+                except Exception as e:
+                    await ctx.send(f"❌ Error during deletion: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    del pending_delete_confirmations[message_id]
+            
+            elif str(reaction.emoji) == '❌':
+                # Cancelled
+                await ctx.send("❌ Deletion cancelled.")
+                del pending_delete_confirmations[message_id]
+            
+            return
+        
+        # Check for confirmation reactions (image processing)
         if message_id not in pending_confirmations:
             return
         
@@ -734,9 +871,797 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
         async with ctx.channel.typing():
             await get_summary_for_date(registry, target_date, ctx.channel)
     
+    @bot.command(name='list')
+    async def list_command(ctx, *, args: str = None):
+        """
+        List logs from a table.
+        
+        Usage:
+        !list food [date] - List food logs (defaults to today)
+        !list exercise [date] - List exercise logs (defaults to today)
+        !list sleep [date] - List sleep logs (defaults to today)
+        !list health [date] - List health logs (defaults to today)
+        !list hydration [date] - List hydration logs (defaults to today)
+        !list table <table_name> [date <date>] - List logs from any table
+        
+        Examples:
+        !list food - Today's food logs
+        !list food yesterday - Yesterday's food logs
+        !list food 2024-01-15 - Food logs for specific date
+        !list table food_logs - Recent food logs (all dates)
+        !list table exercise_logs date 2024-01-15
+        """
+        if not args:
+            embed = discord.Embed(
+                title="❌ List Command Usage",
+                description="Please specify what to list. Use `!help list` for examples.",
+                color=0xff0000
+            )
+            await ctx.send(embed=embed)
+            return
+        
+        parts = args.split()
+        
+        # Map shortcuts to table names
+        shortcut_map = {
+            "food": "food_logs",
+            "exercise": "exercise_logs",
+            "workout": "exercise_logs",
+            "sleep": "sleep_logs",
+            "health": "daily_health",
+            "hydration": "hydration_logs",
+            "water": "hydration_logs",
+            "wellness": "wellness_scores"
+        }
+        
+        table_name = None
+        target_date = None
+        
+        # Check if first part is a shortcut
+        first_part = parts[0].lower()
+        if first_part in shortcut_map:
+            # Shortcut format: !list food [date]
+            table_name = shortcut_map[first_part]
+            # Default to today if no date specified
+            if len(parts) == 1:
+                target_date = get_today_in_timezone()
+            else:
+                # Date is provided
+                date_str = " ".join(parts[1:])
+                try:
+                    target_date = parse_date_string(date_str)
+                except (ValueError, AttributeError):
+                    await ctx.send("❌ Invalid date format. Use YYYY-MM-DD, 'today', or 'yesterday'")
+                    return
+        elif len(parts) >= 2 and parts[0].lower() == "table":
+            # Full format: !list table <table_name> [date <date>]
+            table_name = parts[1]
+            collections = get_available_collections()
+            
+            if table_name not in collections:
+                await ctx.send(
+                    f"❌ Invalid table name: `{table_name}`\n"
+                    f"Available tables: {', '.join(collections)}"
+                )
+                return
+            
+            # Parse date if provided
+            if len(parts) >= 4 and parts[2].lower() == "date":
+                date_str = " ".join(parts[3:])
+                try:
+                    target_date = parse_date_string(date_str)
+                except (ValueError, AttributeError):
+                    await ctx.send("❌ Invalid date format. Use YYYY-MM-DD, 'today', or 'yesterday'")
+                    return
+        else:
+            await ctx.send(
+                "❌ Invalid format.\n\n"
+                "**Shortcuts:**\n"
+                "• `!list food` - Today's food logs\n"
+                "• `!list food yesterday` - Yesterday's food logs\n"
+                "• `!list exercise` - Today's exercise logs\n\n"
+                "**Full format:**\n"
+                "• `!list table <table_name> [date <date>]`\n\n"
+                "Use `!help list` for more examples."
+            )
+            return
+        
+        if not table_name:
+            await ctx.send("❌ Could not determine table name. Use `!help list` for usage.")
+            return
+        
+        # Query the collection
+        collection = db[table_name]
+        query = {}
+        if target_date:
+            query["date"] = target_date.isoformat()
+        
+        # Get records (limit to 50 for display)
+        records = list(collection.find(query).sort("date", -1).sort("timestamp", -1).limit(50))
+        
+        if not records:
+            date_str = f" for {target_date.isoformat()}" if target_date else ""
+            await ctx.send(f"✅ No records found in `{table_name}`{date_str}")
+            return
+        
+        # Format records for display
+        # Create a friendly title based on table name
+        title_map = {
+            "food_logs": "🍽️ Food Logs",
+            "exercise_logs": "🏋️ Exercise Logs",
+            "sleep_logs": "💤 Sleep Logs",
+            "daily_health": "🏥 Health Logs",
+            "hydration_logs": "💧 Hydration Logs",
+            "wellness_scores": "😊 Wellness Scores",
+            "training_days": "📅 Training Days"
+        }
+        title = title_map.get(table_name, f"📋 Logs from `{table_name}`")
+        
+        # Format date for description
+        if target_date:
+            date_desc = target_date.strftime('%B %d, %Y')
+            if target_date == get_today_in_timezone():
+                date_desc = "Today"
+            elif target_date == get_today_in_timezone() - timedelta(days=1):
+                date_desc = "Yesterday"
+        else:
+            date_desc = "All dates"
+        
+        embed = discord.Embed(
+            title=title,
+            description=f"Showing {len(records)} record(s) for {date_desc}",
+            color=0x0099ff
+        )
+        
+        # Format records based on table type
+        formatted_records = []
+        for i, record in enumerate(records[:20], 1):  # Limit to 20 for embed
+            record_date = record.get("date", "Unknown")
+            record_time = record.get("timestamp", "")
+            if record_time:
+                try:
+                    # Extract time from timestamp
+                    if isinstance(record_time, str):
+                        time_part = record_time.split("T")[1].split(".")[0] if "T" in record_time else ""
+                    else:
+                        time_part = str(record_time)
+                except:
+                    time_part = ""
+            else:
+                time_part = ""
+            
+            if table_name == "food_logs":
+                item = record.get("item", "Unknown")
+                calories = record.get("calories", 0)
+                protein = record.get("protein_g", 0)
+                formatted_records.append(
+                    f"**{i}.** `{item}` - {calories} cal, {protein}g protein ({record_date}" + 
+                    (f" {time_part[:5]}" if time_part else "") + ")"
+                )
+            elif table_name == "exercise_logs":
+                ex_type = record.get("exercise_type", "Unknown")
+                duration = record.get("duration_minutes", 0)
+                calories = record.get("calories_burned", 0)
+                formatted_records.append(
+                    f"**{i}.** `{ex_type}` - {duration} min, {calories} cal ({record_date}" +
+                    (f" {time_part[:5]}" if time_part else "") + ")"
+                )
+            elif table_name == "hydration_logs":
+                amount = record.get("amount_oz", 0)
+                formatted_records.append(
+                    f"**{i}.** {amount} oz ({record_date}" +
+                    (f" {time_part[:5]}" if time_part else "") + ")"
+                )
+            elif table_name == "sleep_logs":
+                hours = record.get("hours", 0)
+                score = record.get("sleep_score")
+                quality = record.get("quality_notes", "")
+                score_str = f", score: {score}" if score else ""
+                quality_str = f", {quality}" if quality else ""
+                formatted_records.append(
+                    f"**{i}.** {hours} hours{score_str}{quality_str} ({record_date})"
+                )
+            elif table_name == "daily_health":
+                weight = record.get("weight_lbs")
+                bm = record.get("bowel_movements", 0)
+                electrolytes = record.get("electrolytes_taken")
+                parts = []
+                if weight:
+                    parts.append(f"Weight: {weight} lbs")
+                if bm > 0:
+                    parts.append(f"BM: {bm}")
+                if electrolytes is not None:
+                    parts.append(f"Electrolytes: {'Yes' if electrolytes else 'No'}")
+                formatted_records.append(
+                    f"**{i}.** {', '.join(parts) if parts else 'Health markers'} ({record_date})"
+                )
+            elif table_name == "wellness_scores":
+                mood = record.get("mood")
+                energy = record.get("energy")
+                stress = record.get("stress")
+                parts = []
+                if mood:
+                    parts.append(f"Mood: {mood}")
+                if energy:
+                    parts.append(f"Energy: {energy}")
+                if stress:
+                    parts.append(f"Stress: {stress}")
+                formatted_records.append(
+                    f"**{i}.** {', '.join(parts) if parts else 'Wellness scores'} ({record_date})"
+                )
+            else:
+                # Generic format
+                formatted_records.append(f"**{i}.** {str(record)[:100]} ({record_date})")
+        
+        # Split into chunks if too long (Discord embed field limit is 1024 chars)
+        if formatted_records:
+            # Join all records
+            all_text = "\n".join(formatted_records)
+            
+            # If too long, split into multiple fields
+            if len(all_text) > 1024:
+                # Split into chunks
+                chunks = []
+                current_chunk = ""
+                for record in formatted_records:
+                    if len(current_chunk) + len(record) + 1 > 1024:
+                        chunks.append(current_chunk)
+                        current_chunk = record
+                    else:
+                        if current_chunk:
+                            current_chunk += "\n" + record
+                        else:
+                            current_chunk = record
+                if current_chunk:
+                    chunks.append(current_chunk)
+                
+                for i, chunk in enumerate(chunks[:5], 1):  # Max 5 fields
+                    embed.add_field(
+                        name=f"Records (Part {i})" if len(chunks) > 1 else "Records",
+                        value=chunk,
+                        inline=False
+                    )
+            else:
+                embed.add_field(
+                    name="Records",
+                    value=all_text,
+                    inline=False
+                )
+        
+        if len(records) > 20:
+            embed.set_footer(text=f"Showing first 20 of {len(records)} records. Use date filter to narrow results.")
+        
+        await ctx.send(embed=embed)
+    
+    def parse_date_string(date_str: str) -> date:
+        """Parse date string into date object"""
+        from datetime import timedelta
+        today = get_today_in_timezone()
+        date_str_lower = date_str.lower().strip()
+        
+        if date_str_lower == "yesterday":
+            return today - timedelta(days=1)
+        elif date_str_lower == "today":
+            return today
+        elif date_str_lower == "tomorrow":
+            return today + timedelta(days=1)
+        else:
+            # Try parsing various date formats
+            try:
+                return datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                try:
+                    return datetime.strptime(date_str, "%Y/%m/%d").date()
+                except ValueError:
+                    return datetime.strptime(date_str, "%m/%d/%Y").date()
+    
+    def get_available_collections() -> List[str]:
+        """Get list of available log collections"""
+        # Core log collections (excluding system collections)
+        collections = [
+            "food_logs",
+            "hydration_logs",
+            "wellness_scores",
+            "sleep_logs",
+            "daily_health",
+            "exercise_logs",
+            "training_days"
+        ]
+        return collections
+    
+    def _format_record_preview(table_name: str, record: Dict) -> str:
+        """Format a record for display in delete confirmation"""
+        if table_name == "food_logs":
+            item = record.get("item", "Unknown")
+            calories = record.get("calories", 0)
+            return f"{item} ({calories} cal)"
+        elif table_name == "exercise_logs":
+            ex_type = record.get("exercise_type", "Unknown")
+            duration = record.get("duration_minutes", 0)
+            return f"{ex_type} ({duration} min)"
+        elif table_name == "hydration_logs":
+            amount = record.get("amount_oz", 0)
+            return f"{amount} oz"
+        elif table_name == "sleep_logs":
+            hours = record.get("hours", 0)
+            return f"{hours} hours"
+        elif table_name == "daily_health":
+            weight = record.get("weight_lbs")
+            bm = record.get("bowel_movements", 0)
+            parts = []
+            if weight:
+                parts.append(f"Weight: {weight} lbs")
+            if bm > 0:
+                parts.append(f"BM: {bm}")
+            return ", ".join(parts) if parts else "Health markers"
+        else:
+            return str(record)[:100]
+    
+    async def delete_records(collection_name: str, filter_query: Dict, rag_service=None) -> Dict:
+        """
+        Delete records from a collection and clean up RAG vectors if needed.
+        
+        Args:
+            collection_name: Name of the collection
+            filter_query: MongoDB filter query
+            rag_service: Optional RAG service for vector cleanup
+            
+        Returns:
+            Dict with deletion results
+        """
+        try:
+            collection = db[collection_name]
+            
+            # Find records to be deleted (for RAG cleanup)
+            records_to_delete = list(collection.find(filter_query))
+            count = len(records_to_delete)
+            
+            if count == 0:
+                return {"success": True, "deleted_count": 0, "message": "No records found to delete"}
+            
+            # Delete from MongoDB
+            result = collection.delete_many(filter_query)
+            deleted_count = result.deleted_count
+            
+            # Clean up RAG vectors if service is available
+            if rag_service and deleted_count > 0:
+                for record in records_to_delete:
+                    record_id = str(record.get("_id", ""))
+                    if record_id:
+                        try:
+                            rag_service.delete_documents_by_source_id(record_id, collection_name)
+                        except Exception as e:
+                            print(f"⚠️  Warning: Failed to delete RAG vectors for {collection_name}/{record_id}: {e}")
+            
+            return {
+                "success": True,
+                "deleted_count": deleted_count,
+                "message": f"Successfully deleted {deleted_count} record(s) from {collection_name}"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "deleted_count": 0,
+                "message": f"Error deleting from {collection_name}: {str(e)}"
+            }
+    
+    @bot.command(name='delete')
+    async def delete_command(ctx, *, args: str = None):
+        """
+        Delete logs from the database.
+        
+        Usage:
+        !delete food <item_name> - Delete food item from today's log
+        !delete food <item_name> <date> - Delete food item from specific date
+        !delete exercise <item_name> - Delete exercise from today's log
+        !delete table <table_name> date <date> - Delete all logs for a table on a specific date
+        !delete table <table_name> all - Delete all logs for a table
+        !delete date <date> - Delete all logs for all tables on a specific date
+        
+        Examples:
+        !delete food smoothie - Delete smoothie from today
+        !delete food smoothie yesterday - Delete smoothie from yesterday
+        !delete exercise cycling - Delete cycling workout from today
+        !delete table food_logs date 2024-01-15
+        !delete table sleep_logs all
+        
+        Tip: Use !list food first to see available items!
+        """
+        if not args:
+            embed = discord.Embed(
+                title="❌ Delete Command Usage",
+                description="Please specify what to delete. Use `!help delete` for examples.",
+                color=0xff0000
+            )
+            await ctx.send(embed=embed)
+            return
+        
+        args_lower = args.lower().strip()
+        parts = args.split()
+        
+        # Get RAG service if available
+        rag_service = None
+        if orchestrator and hasattr(orchestrator, 'rag_service'):
+            rag_service = orchestrator.rag_service
+        
+        # Map shortcuts to table names and field names
+        shortcut_map = {
+            "food": {"table": "food_logs", "field": "item"},
+            "exercise": {"table": "exercise_logs", "field": "exercise_type"},
+            "workout": {"table": "exercise_logs", "field": "exercise_type"}
+        }
+        
+        # Parse command
+        try:
+            # Check if first part is a shortcut (food, exercise, etc.)
+            first_part = parts[0].lower()
+            if first_part in shortcut_map:
+                # Shortcut format: !delete food <item_name> [date]
+                table_info = shortcut_map[first_part]
+                table_name = table_info["table"]
+                field_name = table_info["field"]
+                
+                if len(parts) < 2:
+                    await ctx.send(
+                        f"❌ Please specify an item name. Usage: `!delete {first_part} <item_name> [date]`\n"
+                        f"Example: `!delete {first_part} smoothie` or `!delete {first_part} smoothie yesterday`"
+                    )
+                    return
+                
+                # Get item name (could be multiple words)
+                # Check if last part looks like a date
+                item_parts = parts[1:]
+                target_date = get_today_in_timezone()  # Default to today
+                
+                # Try to parse last part as date
+                if len(item_parts) > 1:
+                    # Check if last part is a date keyword or date format
+                    last_part = item_parts[-1].lower()
+                    if last_part in ["today", "yesterday", "tomorrow"] or \
+                       any(c.isdigit() for c in last_part):  # Looks like a date
+                        try:
+                            target_date = parse_date_string(item_parts[-1])
+                            item_name = " ".join(item_parts[:-1])  # Everything except last part
+                        except (ValueError, AttributeError):
+                            # Not a valid date, treat as part of item name
+                            item_name = " ".join(item_parts)
+                    else:
+                        item_name = " ".join(item_parts)
+                else:
+                    item_name = item_parts[0]
+                
+                # Check if records exist (case-insensitive search, for today by default)
+                collection = db[table_name]
+                import re
+                query = {
+                    field_name: {"$regex": f"^{re.escape(item_name)}$", "$options": "i"},
+                    "date": target_date.isoformat()
+                }
+                
+                records = list(collection.find(query))
+                
+                if not records:
+                    date_str = "today" if target_date == get_today_in_timezone() else target_date.isoformat()
+                    await ctx.send(
+                        f"❌ No records found with item name `{item_name}` in `{table_name}` for {date_str}.\n"
+                        f"Use `!list {first_part}` to see available items."
+                    )
+                    return
+                
+                # Show matching records and ask for confirmation
+                if len(records) == 1:
+                    record = records[0]
+                    preview = _format_record_preview(table_name, record)
+                    
+                    embed = discord.Embed(
+                        title="⚠️ Confirm Deletion",
+                        description=(
+                            f"You are about to delete a record from `{table_name}`.\n\n"
+                            f"**Item:** `{item_name}`\n"
+                            f"**Date:** {target_date.isoformat()}\n"
+                            f"**Details:** {preview}\n\n"
+                            f"This action **CANNOT** be undone!\n\n"
+                            f"React with ✅ to confirm or ❌ to cancel."
+                        ),
+                        color=0xff9900
+                    )
+                else:
+                    # Multiple records found
+                    embed = discord.Embed(
+                        title="⚠️ Confirm Deletion",
+                        description=(
+                            f"You are about to delete **{len(records)}** record(s) from `{table_name}` "
+                            f"with item name `{item_name}` for {target_date.isoformat()}.\n\n"
+                            f"This action **CANNOT** be undone!\n\n"
+                            f"React with ✅ to confirm or ❌ to cancel."
+                        ),
+                        color=0xff9900
+                    )
+                
+                msg = await ctx.send(embed=embed)
+                await msg.add_reaction('✅')
+                await msg.add_reaction('❌')
+                
+                pending_delete_confirmations[msg.id] = {
+                    'type': 'table_item_date',
+                    'table_name': table_name,
+                    'item_name': item_name,
+                    'field_name': field_name,
+                    'date': target_date,
+                    'ctx': ctx
+                }
+                return
+            
+            # Continue with existing table-based commands
+            if len(parts) >= 2 and parts[0].lower() == "table" and parts[1].lower() == "all":
+                # Delete all logs for a table
+                if len(parts) < 3:
+                    await ctx.send("❌ Please specify a table name. Usage: `!delete table <table_name> all`")
+                    return
+                
+                table_name = parts[2]
+                collections = get_available_collections()
+                
+                if table_name not in collections:
+                    await ctx.send(
+                        f"❌ Invalid table name: `{table_name}`\n"
+                        f"Available tables: {', '.join(collections)}"
+                    )
+                    return
+                
+                # Confirmation required for destructive operation
+                embed = discord.Embed(
+                    title="⚠️ Confirm Deletion",
+                    description=(
+                        f"You are about to delete **ALL** logs from `{table_name}`.\n\n"
+                        f"This action **CANNOT** be undone!\n\n"
+                        f"React with ✅ to confirm or ❌ to cancel."
+                    ),
+                    color=0xff9900
+                )
+                msg = await ctx.send(embed=embed)
+                await msg.add_reaction('✅')
+                await msg.add_reaction('❌')
+                
+                pending_delete_confirmations[msg.id] = {
+                    'type': 'table_all',
+                    'table_name': table_name,
+                    'ctx': ctx
+                }
+                return
+            
+            elif len(parts) >= 4 and parts[0].lower() == "table" and parts[2].lower() == "date":
+                # Delete logs for a table on a specific date
+                table_name = parts[1]
+                date_str = " ".join(parts[3:])
+                collections = get_available_collections()
+                
+                if table_name not in collections:
+                    await ctx.send(
+                        f"❌ Invalid table name: `{table_name}`\n"
+                        f"Available tables: {', '.join(collections)}"
+                    )
+                    return
+                
+                try:
+                    target_date = parse_date_string(date_str)
+                except (ValueError, AttributeError):
+                    await ctx.send("❌ Invalid date format. Use YYYY-MM-DD, 'today', or 'yesterday'")
+                    return
+                
+                # Show what will be deleted and ask for confirmation
+                collection = db[table_name]
+                count = collection.count_documents({"date": target_date.isoformat()})
+                
+                if count == 0:
+                    await ctx.send(f"✅ No records found in `{table_name}` for {target_date.isoformat()}")
+                    return
+                
+                embed = discord.Embed(
+                    title="⚠️ Confirm Deletion",
+                    description=(
+                        f"You are about to delete **{count}** log(s) from `{table_name}` "
+                        f"for **{target_date.strftime('%B %d, %Y')}**.\n\n"
+                        f"This action **CANNOT** be undone!\n\n"
+                        f"React with ✅ to confirm or ❌ to cancel."
+                    ),
+                    color=0xff9900
+                )
+                msg = await ctx.send(embed=embed)
+                await msg.add_reaction('✅')
+                await msg.add_reaction('❌')
+                
+                pending_delete_confirmations[msg.id] = {
+                    'type': 'table_date',
+                    'table_name': table_name,
+                    'date': target_date,
+                    'ctx': ctx
+                }
+                return
+            
+            
+            elif len(parts) >= 2 and parts[0].lower() == "date":
+                # Delete all logs for all tables on a specific date
+                date_str = " ".join(parts[1:])
+                
+                try:
+                    target_date = parse_date_string(date_str)
+                except (ValueError, AttributeError):
+                    await ctx.send("❌ Invalid date format. Use YYYY-MM-DD, 'today', or 'yesterday'")
+                    return
+                
+                # Count records across all collections
+                collections = get_available_collections()
+                total_count = 0
+                counts_by_table = {}
+                
+                for table_name in collections:
+                    collection = db[table_name]
+                    count = collection.count_documents({"date": target_date.isoformat()})
+                    if count > 0:
+                        counts_by_table[table_name] = count
+                        total_count += count
+                
+                if total_count == 0:
+                    await ctx.send(f"✅ No records found for {target_date.isoformat()}")
+                    return
+                
+                # Show breakdown and ask for confirmation
+                breakdown = "\n".join([f"• `{table}`: {count} record(s)" for table, count in counts_by_table.items()])
+                
+                embed = discord.Embed(
+                    title="⚠️ Confirm Deletion",
+                    description=(
+                        f"You are about to delete **{total_count}** log(s) across all tables "
+                        f"for **{target_date.strftime('%B %d, %Y')}**.\n\n"
+                        f"**Breakdown:**\n{breakdown}\n\n"
+                        f"This action **CANNOT** be undone!\n\n"
+                        f"React with ✅ to confirm or ❌ to cancel."
+                    ),
+                    color=0xff9900
+                )
+                msg = await ctx.send(embed=embed)
+                await msg.add_reaction('✅')
+                await msg.add_reaction('❌')
+                
+                pending_delete_confirmations[msg.id] = {
+                    'type': 'date_all',
+                    'date': target_date,
+                    'ctx': ctx
+                }
+                return
+            
+            else:
+                await ctx.send(
+                    "❌ Invalid delete command format.\n\n"
+                    "**Usage:**\n"
+                "• `!delete food <item_name>` - Delete food item from today's log\n"
+                "• `!delete food <item_name> <date>` - Delete food item from specific date\n"
+                "• `!delete exercise <item_name>` - Delete exercise from today's log\n"
+                "• `!delete table <table_name> date <date>` - Delete all logs for a table on a date\n"
+                "• `!delete table <table_name> all` - Delete all logs for a table\n"
+                "• `!delete date <date>` - Delete all logs for all tables on a date\n\n"
+                "**Examples:**\n"
+                "• `!delete food smoothie` - Delete smoothie from today\n"
+                "• `!delete food smoothie yesterday` - Delete smoothie from yesterday\n"
+                "• `!delete exercise cycling` - Delete cycling workout from today\n"
+                "• `!delete table food_logs date 2024-01-15`\n"
+                "• `!delete table sleep_logs all`\n\n"
+                "**Tip:** Use `!list food` first to see available items!"
+                )
+                return
+        
+        except Exception as e:
+            await ctx.send(f"❌ Error parsing delete command: {str(e)}")
+            import traceback
+            traceback.print_exc()
+    
     @bot.command(name='help')
-    async def help_command(ctx):
+    async def help_command(ctx, command: str = None):
         """Show available commands and modules"""
+        if command and command.lower() == "list":
+            embed = discord.Embed(
+                title="📋 List Command Help",
+                description="List logs from a table to see what's available",
+                color=0x0099ff
+            )
+            embed.add_field(
+                name="Shortcuts (defaults to today)",
+                value=(
+                    "`!list food` - Today's food logs\n"
+                    "`!list food yesterday` - Yesterday's food logs\n"
+                    "`!list exercise` - Today's exercise logs\n"
+                    "`!list sleep` - Today's sleep logs\n"
+                    "`!list health` - Today's health logs\n"
+                    "`!list hydration` - Today's hydration logs"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="Full Format",
+                value=(
+                    "`!list table <table_name>` - List recent logs from a table\n"
+                    "`!list table <table_name> date <date>` - List logs for a specific date"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="Examples",
+                value=(
+                    "`!list food` - Today's food\n"
+                    "`!list food 2024-01-15` - Food for specific date\n"
+                    "`!list table food_logs` - All recent food logs\n"
+                    "`!list exercise yesterday` - Yesterday's workouts"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="Available Tables",
+                value="`food_logs`, `hydration_logs`, `wellness_scores`, `sleep_logs`, `daily_health`, `exercise_logs`, `training_days`",
+                inline=False
+            )
+            embed.add_field(
+                name="Date Formats",
+                value="`YYYY-MM-DD`, `today`, `yesterday`, `tomorrow`",
+                inline=False
+            )
+            await ctx.send(embed=embed)
+            return
+        
+        if command and command.lower() == "delete":
+            embed = discord.Embed(
+                title="🗑️ Delete Command Help",
+                description="Delete logs from the database",
+                color=0x0099ff
+            )
+            embed.add_field(
+                name="Shortcuts (defaults to today)",
+                value=(
+                    "`!delete food <item_name>` - Delete food item from today's log\n"
+                    "`!delete food <item_name> <date>` - Delete food item from specific date\n"
+                    "`!delete exercise <item_name>` - Delete exercise from today's log\n"
+                    "`!delete exercise <item_name> <date>` - Delete exercise from specific date"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="Full Format",
+                value=(
+                    "`!delete table <table_name> date <date>` - Delete all logs for a table on a date\n"
+                    "`!delete table <table_name> all` - Delete all logs for a table\n"
+                    "`!delete date <date>` - Delete all logs for all tables on a date"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="Examples",
+                value=(
+                    "`!delete food smoothie` - Delete smoothie from today\n"
+                    "`!delete food smoothie yesterday` - Delete smoothie from yesterday\n"
+                    "`!delete exercise cycling` - Delete cycling workout from today\n"
+                    "`!delete table food_logs date 2024-01-15`\n"
+                    "`!delete table sleep_logs all`"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="Available Tables",
+                value="`food_logs`, `hydration_logs`, `wellness_scores`, `sleep_logs`, `daily_health`, `exercise_logs`, `training_days`",
+                inline=False
+            )
+            embed.add_field(
+                name="Date Formats",
+                value="`YYYY-MM-DD`, `today`, `yesterday`, `tomorrow`",
+                inline=False
+            )
+            embed.add_field(
+                name="Tip",
+                value="Use `!list food` first to see available items!",
+                inline=False
+            )
+            await ctx.send(embed=embed)
+            return
+        
         embed = discord.Embed(
             title="🤖 Bot Commands",
             description="Available commands and modules",
@@ -750,7 +1675,12 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
                 "`!summary` - Today's summary from all modules\n"
                 "`!summary 2024-01-15` - Summary for specific date\n"
                 "`!summary yesterday` - Yesterday's summary\n"
-                "`!help` - This message\n\n"
+                "`!list food` - List today's food logs (use `!help list` for more)\n"
+                "`!list exercise` - List today's exercise logs\n"
+                "`!delete` - Delete logs (use `!help delete` for details)\n"
+                "`!help` - This message\n"
+                "`!help list` - List command help\n"
+                "`!help delete` - Delete command help\n\n"
                 "You can also ask for summaries naturally:\n"
                 "- \"show me today's summary\"\n"
                 "- \"what did I do yesterday?\"\n"
