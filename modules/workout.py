@@ -252,7 +252,6 @@ If any field is not visible, use null."""
     # Helper methods
     # ---------------------------------------------------------------------
     def _store_exercise(self, exercise: Dict, lifelog_id: str) -> str:
-    def _store_exercise(self, exercise: Dict, lifelog_id: str) -> str:
         """Store exercise log and return record ID."""
         self.logger.info(f"Storing exercise: {exercise.get('type')}, "
                         f"{exercise.get('duration_minutes') or 0} min, "
@@ -290,7 +289,6 @@ If any field is not visible, use null."""
             self._vectorize_record(exercise_record, "exercise_logs")
         return str(result.inserted_id)
     
-    def _update_training_day(self, date_obj: date, exercise: Dict, exercise_id: str):
     def _update_training_day(self, date_obj: date, exercise: Dict, exercise_id: str):
         """Update training day intensity based on workout duration."""
         training_days_collection = self.db["training_days"]

@@ -69,7 +69,7 @@ class NutritionModule(BaseModule):
         custom_foods_collection = self.db["custom_foods"]
         custom_foods = self.config.get('custom_foods', [])
         
-        for food in custom_foods_config:
+        for food in custom_foods:
             try:
                 custom_foods_collection.update_one(
                     {"name": food['name']},
