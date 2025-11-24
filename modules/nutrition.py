@@ -1,13 +1,10 @@
 """
-Nutrition Module - Food, macro, and hydration tracking.
+Nutrition Module - Food and macro tracking.
 
 Features:
 - Food logging with custom recipe database
 - Macro tracking with dynamic targets
-- Hydration logging
-- Sleep tracking
-- Health markers (weight, bowel movements, supplements)
-- Wellness scores (mood, energy, stress)
+- Hydration/water logging (stored in hydration_logs collection)
 - Daily summaries
 - Image analysis for restaurant meals
 """
@@ -20,7 +17,7 @@ import json
 
 
 class NutritionModule(BaseModule):
-    """Comprehensive nutrition and health tracking"""
+    """Food and macro tracking with hydration logging"""
     
     def get_name(self) -> str:
         return "nutrition"
@@ -30,12 +27,7 @@ class NutritionModule(BaseModule):
             'log that', 'log this', 'track this', 'track that',
             'check macros', 'macro check', 'nutrition summary',
             'what should i eat', 'meal ideas', 'dinner ideas',
-            'drank', 'water', 'hydration',
-            'slept', 'sleep', 'woke up',
-            'weighed', 'weight',
-            'took supplements', 'took electrolytes',
-            'feeling', 'mood', 'energy', 'stress',
-            'bowel movement'
+            'drank', 'water', 'hydration'
         ]
     
     def get_question_patterns(self) -> List[str]:
@@ -49,65 +41,50 @@ class NutritionModule(BaseModule):
                 r'did i (hit|reach|meet)',
                 r'(macro|nutrition|food) (summary|totals|check)',
                 r'how (much|many).*water',
-                r'did i.*sleep',
                 r'suggest.*lunch',
                 r'recommend.*dinner'
             ]
     
     def setup_database(self):
         """Create all nutrition-related collections and indexes"""
-        # Collections are created automatically on first insert
-        # Create indexes for performance
-        
         # Food logs collection
-        food_logs = self.conn["food_logs"]
-        food_logs.create_index("date")
+        food_logs = self.db["food_logs"]
+        food_logs.create_index([("date", 1), ("timestamp", 1)])
         food_logs.create_index("lifelog_id")
         
-        # Custom foods collection
-        custom_foods = self.conn["custom_foods"]
+        # Custom foods database
+        custom_foods = self.db["custom_foods"]
         custom_foods.create_index("name", unique=True)
         
-        # Hydration logs collection
-        hydration_logs = self.conn["hydration_logs"]
-        hydration_logs.create_index("date")
+        # Hydration logs
+        hydration_logs = self.db["hydration_logs"]
+        hydration_logs.create_index([("date", 1), ("timestamp", 1)])
         hydration_logs.create_index("lifelog_id")
-        
-        # Sleep logs collection
-        sleep_logs = self.conn["sleep_logs"]
-        sleep_logs.create_index("date", unique=True)
-        
-        # Daily health collection
-        daily_health = self.conn["daily_health"]
-        daily_health.create_index("date", unique=True)
-        
-        # Wellness scores collection
-        wellness_scores = self.conn["wellness_scores"]
-        wellness_scores.create_index("date")
-        wellness_scores.create_index("lifelog_id")
         
         # Load custom foods from config
         self._load_custom_foods()
     
     def _load_custom_foods(self):
         """Load custom foods from configuration"""
-        custom_foods_config = self.config.get('custom_foods', [])
-        custom_foods_collection = self.conn["custom_foods"]
+        custom_foods_collection = self.db["custom_foods"]
+        custom_foods = self.config.get('custom_foods', [])
         
         for food in custom_foods_config:
             try:
-                custom_foods_collection.replace_one(
+                custom_foods_collection.update_one(
                     {"name": food['name']},
                     {
-                        "name": food['name'],
-                        "aliases": json.dumps(food.get('aliases', [])),
-                        "calories": food['calories'],
-                        "protein_g": food['protein_g'],
-                        "carbs_g": food['carbs_g'],
-                        "fat_g": food['fat_g'],
-                        "fiber_g": food.get('fiber_g', 0),
-                        "notes": food.get('notes', ''),
-                        "created_at": datetime.now().isoformat()
+                        "$set": {
+                            "name": food['name'],
+                            "aliases": food.get('aliases', []),
+                            "calories": food['calories'],
+                            "protein_g": food['protein_g'],
+                            "carbs_g": food['carbs_g'],
+                            "fat_g": food['fat_g'],
+                            "fiber_g": food.get('fiber_g', 0),
+                            "notes": food.get('notes', ''),
+                            "created_at": self.get_now_in_timezone()
+                        }
                     },
                     upsert=True
                 )
@@ -118,79 +95,66 @@ class NutritionModule(BaseModule):
                         analysis: Dict) -> Dict:
         """Process food/health logging"""
         
-        # Get today's transcript for context
-        # ensure API uses correct boolean + timezone parameters
-        transcript = self.limitless_client.get_todays_transcript(timezone="America/Los_Angeles")
+        self.logger.info(f"Processing nutrition log for lifelog_id: {lifelog_id}")
+        
+        # message_content now contains the context transcript (last 5 entries from polling batch)
+        # No need to fetch full day's transcript
         
         # Get custom foods for context
         custom_foods_context = self._get_custom_foods_context()
         
         # Analyze with OpenAI
+        self.logger.debug(f"Analyzing transcript with OpenAI (length: {len(message_content)} chars)")
         prompt = self._build_analysis_prompt(custom_foods_context)
         
         analysis = self.openai_client.analyze_text(
-            transcript=f"{transcript}\n\nMOST RECENT: {message_content}",
+            transcript=message_content,
             module_name=self.get_name(),
             prompt_template=prompt
         )
         
         if not analysis:
+            self.logger.error("No response from OpenAI")
             return {"embed": self._create_error_embed("No response from OpenAI")}
 
         if 'error' in analysis:
+            self.logger.error(f"OpenAI analysis error: {analysis['error']}")
             return {'embed': self._create_error_embed(analysis['error'])}
         
         # Store all detected data
-        self._store_foods(analysis.get('foods_consumed', []), lifelog_id)
-        self._store_hydration(analysis.get('hydration', {}), lifelog_id)
-        self._store_sleep(analysis.get('sleep', {}), lifelog_id)
-        self._store_health_markers(analysis.get('health_markers', {}), lifelog_id)
-        self._store_wellness(analysis.get('wellness', {}), lifelog_id)
+        foods = analysis.get('foods_consumed', [])
+        hydration = analysis.get('hydration', {})
+        
+        self.logger.info(f"Detected: {len(foods)} foods, hydration={hydration.get('detected', False)}")
+        
+        self._store_foods(foods, lifelog_id)
+        self._store_hydration(hydration, lifelog_id)
         
         # Get updated summary
-        summary = self._get_daily_summary_internal(date.today())
+        summary = self._get_daily_summary_internal(self.get_today_in_timezone())
         
         # Create confirmation embed
         embed = self._create_log_confirmation_embed(summary)
         
-        return {'embed': embed}
-    
-    async def handle_query(self, query: str, context: Dict) -> str:
-        """Answer nutrition questions"""
-
-        # Diagnostic print – confirm that this function is being called
-        print(f"🧩 Nutrition.handle_query() triggered with query: {query!r}")
-
-        # Get relevant data
-        today_summary = self._get_daily_summary_internal(date.today())
-        transcript = self.limitless_client.get_todays_transcript()
-
-        context_data = {
-            'today_summary': today_summary,
-            'recent_transcript': transcript[:2000]  # Limit size
+        # Build what was logged for notifications
+        logged_items = []
+        if foods:
+            food_names = [f.get('item', 'Unknown') for f in foods]
+            logged_items.append(f"Food: {', '.join(food_names)}")
+        if hydration.get('detected') and hydration.get('entries'):
+            total_oz = sum(e.get('amount_oz', 0) for e in hydration.get('entries', []))
+            logged_items.append(f"Hydration: {total_oz}oz")
+        
+        self.logger.info(f"✓ Successfully processed nutrition log for lifelog_id: {lifelog_id}")
+        return {
+            'embed': embed,
+            'logged_items': logged_items,
+            'logged_data': {
+                'foods': foods,
+                'hydration': hydration
+            }
         }
-
-        # Make the OpenAI call
-        try:
-            answer = self.openai_client.answer_query(
-                query=query,
-                context=context_data,
-                system_prompt=(
-                    "You are a nutrition and wellness assistant with access to the "
-                    "user's food logs, health data, and daily activities."
-                )
-            )
-            # Diagnostic print – confirm what was returned
-            print(f"🧩 Nutrition.handle_query() returning: {answer!r}")
-            return answer
-
-        except Exception as e:
-            print(f"❌ Nutrition.handle_query() error: {e}")
-            return f"Error while processing your nutrition query: {e}"
-
-        print(f"🧠 OpenAI answer: {answer}")
-        return answer
-
+    
     async def handle_image(self, image_bytes: bytes, context: str) -> Dict:
         """Analyze food plate images"""
         
@@ -281,28 +245,37 @@ Respond with ONLY valid JSON:
     
     def _get_custom_foods_context(self) -> str:
         """Get custom foods as context for AI"""
-        custom_foods_collection = self.conn["custom_foods"]
-        foods = custom_foods_collection.find({}, {"name": 1, "aliases": 1, "calories": 1, "protein_g": 1, "carbs_g": 1, "fat_g": 1, "fiber_g": 1})
+        custom_foods_collection = self.db["custom_foods"]
+        foods = custom_foods_collection.find({})
         
         context = "CUSTOM FOODS DATABASE (check these first):\n"
         for food in foods:
-            name = food.get("name")
-            aliases_json = food.get("aliases", "[]")
-            cal = food.get("calories", 0)
-            protein = food.get("protein_g", 0)
-            carbs = food.get("carbs_g", 0)
-            fat = food.get("fat_g", 0)
-            fiber = food.get("fiber_g", 0)
-            aliases = json.loads(aliases_json) if isinstance(aliases_json, str) else aliases_json
+            name = food.get('name')
+            aliases = food.get('aliases', [])
+            cal = food.get('calories', 0)
+            protein = food.get('protein_g', 0)
+            carbs = food.get('carbs_g', 0)
+            fat = food.get('fat_g', 0)
+            fiber = food.get('fiber_g', 0)
             context += f"- {name}: {aliases} → {cal} cal, {protein}g protein, {carbs}g carbs, {fat}g fat, {fiber}g fiber\n"
         
         return context
     
     def _build_analysis_prompt(self, custom_context: str) -> str:
         """Build comprehensive analysis prompt"""
-        return f"""Extract ALL relevant health and nutrition data from this transcript.
+        return f"""Extract food and hydration data from this transcript.
 
         {custom_context}
+
+        IMPORTANT INSTRUCTIONS:
+        - If a food is in the CUSTOM FOODS DATABASE above, use those exact values and set is_custom_food=true
+        - If a food is NOT in the custom foods database, you MUST estimate nutrition values using standard nutrition knowledge
+        - NEVER leave calories, protein, carbs, fat, or fiber as 0 unless the food truly has none
+        - For common foods (banana, apple, chicken, etc.), use standard serving size estimates
+        - Always provide realistic nutrition estimates for any food item
+        - WATER/HYDRATION: If the user mentions drinking water, water bottles, hydration, or any liquid that is plain water (not juice, coffee, etc.), 
+          set hydration.detected=true and include the amount in ounces. Do NOT include water as a food item.
+        - Only include actual food items in foods_consumed. Water, plain water, hydration drinks (if just water), etc. should go in hydration, not foods_consumed.
 
         TRANSCRIPT:
         {{transcript}}
@@ -313,30 +286,30 @@ Respond with ONLY valid JSON:
             {{{{
             "item": "food name",
             "time": "HH:MM",
-            "calories": 0,
-            "protein_g": 0,
-            "carbs_g": 0,
-            "fat_g": 0,
-            "fiber_g": 0,
+            "calories": <estimate if not custom, use custom value if custom>,
+            "protein_g": <estimate if not custom, use custom value if custom>,
+            "carbs_g": <estimate if not custom, use custom value if custom>,
+            "fat_g": <estimate if not custom, use custom value if custom>,
+            "fiber_g": <estimate if not custom, use custom value if custom>,
             "is_custom_food": true/false,
             "custom_food_name": "smoothie_small" or null
             }}}}
         ],
-        "hydration": {{{{"detected": true/false, "entries": [{{{{"amount_oz": 16}}}}]}}}},
-        "sleep": {{{{"detected": true/false, "hours": 7.5, "sleep_score": 85, "quality": "good/poor/restless"}}}},
-        "health_markers": {{{{"weight_lbs": null, "bowel_movements": 0, "electrolytes_taken": true/false}}}},
-        "wellness": {{{{"mood": "good", "stress_level": 0-5, "energy_score": 0-10}}}}
+        "hydration": {{{{"detected": true/false, "entries": [{{{{"amount_oz": 16}}}}]}}}}
         }}}}"""
     
     def _store_foods(self, foods: List[Dict], lifelog_id: str):
         """Store food logs"""
         if not foods:
+            self.logger.debug("No foods to store")
             return
         
-        food_logs_collection = self.conn["food_logs"]
-        today = date.today()
-        now = datetime.now()
+        self.logger.info(f"Storing {len(foods)} food item(s)")
+        food_logs_collection = self.db["food_logs"]
+        today = self.get_today_in_timezone()
+        now = self.get_now_in_timezone()
         
+        documents = []
         documents = []
         for food in foods:
             documents.append({
@@ -351,122 +324,59 @@ Respond with ONLY valid JSON:
                 "is_custom_food": food.get('is_custom_food', False),
                 "custom_food_name": food.get('custom_food_name'),
                 "lifelog_id": lifelog_id,
-                "created_at": now.isoformat()
+                "created_at": now
             })
+            self.logger.debug(f"  - {food['item']}: {food.get('calories', 0)} cal, "
+                            f"{food.get('protein_g', 0)}g protein")
         
         if documents:
-            food_logs_collection.insert_many(documents)
+            result = food_logs_collection.insert_many(documents)
+            self.logger.info(f"✓ Stored {len(documents)} food log(s) in MongoDB")
+            # Vectorize each inserted document
+            for i, doc in enumerate(documents):
+                doc["_id"] = result.inserted_ids[i]
+                self._vectorize_record(doc, "food_logs")
     
     def _store_hydration(self, hydration: Dict, lifelog_id: str):
         """Store hydration logs"""
         if not hydration.get('detected'):
+            self.logger.debug("No hydration detected")
             return
         
-        hydration_logs_collection = self.conn["hydration_logs"]
-        today = date.today()
-        now = datetime.now()
+        entries = hydration.get('entries', [])
+        total_oz = sum(entry.get('amount_oz', 0) for entry in entries)
+        self.logger.info(f"Storing hydration: {len(entries)} entry/entries, {total_oz} oz total")
+        
+        hydration_logs_collection = self.db["hydration_logs"]
+        today = self.get_today_in_timezone()
+        now = self.get_now_in_timezone()
         
         documents = []
-        for entry in hydration.get('entries', []):
+        for entry in entries:
             documents.append({
                 "date": today.isoformat(),
                 "timestamp": now.isoformat(),
                 "amount_oz": entry['amount_oz'],
                 "lifelog_id": lifelog_id,
-                "created_at": now.isoformat()
+                "created_at": now
             })
+            self.logger.debug(f"  - {entry['amount_oz']} oz")
         
         if documents:
-            hydration_logs_collection.insert_many(documents)
-    
-    def _store_sleep(self, sleep: Dict, lifelog_id: str):
-        """Store sleep logs"""
-        if not sleep.get('detected'):
-            return
-        
-        sleep_logs_collection = self.conn["sleep_logs"]
-        today = date.today()
-        now = datetime.now()
-        
-        sleep_logs_collection.replace_one(
-            {"date": today.isoformat()},
-            {
-                "date": today.isoformat(),
-                "hours": sleep['hours'],
-                "sleep_score": sleep.get('sleep_score'),
-                "quality_notes": sleep.get('quality'),
-                "lifelog_id": lifelog_id,
-                "created_at": now.isoformat()
-            },
-            upsert=True
-        )
-    
-    def _store_health_markers(self, health: Dict, lifelog_id: str):
-        """Store health markers"""
-        if not any(health.values()):
-            return
-        
-        daily_health_collection = self.conn["daily_health"]
-        today = date.today()
-        now = datetime.now()
-        
-        # Get existing document if it exists
-        existing = daily_health_collection.find_one({"date": today.isoformat()})
-        
-        if existing:
-            # Update existing document
-            update_data = {}
-            if health.get('weight_lbs') is not None:
-                update_data["weight_lbs"] = health.get('weight_lbs')
-            if health.get('bowel_movements', 0) > 0:
-                update_data["bowel_movements"] = existing.get("bowel_movements", 0) + health.get('bowel_movements', 0)
-            if health.get('electrolytes_taken'):
-                update_data["electrolytes_taken"] = True
-            update_data["lifelog_id"] = lifelog_id
-            
-            daily_health_collection.update_one(
-                {"date": today.isoformat()},
-                {"$set": update_data}
-            )
-        else:
-            # Insert new document
-            daily_health_collection.insert_one({
-                "date": today.isoformat(),
-                "weight_lbs": health.get('weight_lbs'),
-                "bowel_movements": health.get('bowel_movements', 0),
-                "electrolytes_taken": health.get('electrolytes_taken', False),
-                "lifelog_id": lifelog_id,
-                "created_at": now.isoformat()
-            })
-    
-    def _store_wellness(self, wellness: Dict, lifelog_id: str):
-        """Store wellness scores"""
-        if not any(v is not None for v in wellness.values()):
-            return
-        
-        wellness_scores_collection = self.conn["wellness_scores"]
-        today = date.today()
-        now = datetime.now()
-        
-        wellness_scores_collection.insert_one({
-            "date": today.isoformat(),
-            "timestamp": now.isoformat(),
-            "mood": wellness.get('mood'),
-            "stress_level": wellness.get('stress_level'),
-            "hunger_score": wellness.get('hunger_score'),
-            "energy_score": wellness.get('energy_score'),
-            "soreness_score": wellness.get('soreness_score'),
-            "notes": wellness.get('notes'),
-            "lifelog_id": lifelog_id,
-            "created_at": now.isoformat()
-        })
+            result = hydration_logs_collection.insert_many(documents)
+            self.logger.info(f"✓ Stored {len(documents)} hydration log(s) in MongoDB")
+            # Vectorize each inserted document
+            for i, doc in enumerate(documents):
+                doc["_id"] = result.inserted_ids[i]
+                self._vectorize_record(doc, "hydration_logs")
     
     def _get_daily_summary_internal(self, date_obj: date) -> Dict:
         """Calculate daily totals and progress"""
         date_str = date_obj.isoformat()
+        date_str = date_obj.isoformat()
         
-        # Food totals using aggregation
-        food_logs_collection = self.conn["food_logs"]
+        # Food totals
+        food_logs_collection = self.db["food_logs"]
         food_pipeline = [
             {"$match": {"date": date_str}},
             {"$group": {
@@ -480,24 +390,21 @@ Respond with ONLY valid JSON:
         ]
         food_result = list(food_logs_collection.aggregate(food_pipeline))
         if food_result:
-            totals = [
-                food_result[0].get("calories", 0) or 0,
-                food_result[0].get("protein_g", 0) or 0,
-                food_result[0].get("carbs_g", 0) or 0,
-                food_result[0].get("fat_g", 0) or 0,
-                food_result[0].get("fiber_g", 0) or 0
-            ]
+            totals = (
+                food_result[0].get("calories", 0),
+                food_result[0].get("protein_g", 0),
+                food_result[0].get("carbs_g", 0),
+                food_result[0].get("fat_g", 0),
+                food_result[0].get("fiber_g", 0)
+            )
         else:
-            totals = [0, 0, 0, 0, 0]
+            totals = (0, 0, 0, 0, 0)
         
         # Hydration
-        hydration_logs_collection = self.conn["hydration_logs"]
+        hydration_logs_collection = self.db["hydration_logs"]
         hydration_pipeline = [
             {"$match": {"date": date_str}},
-            {"$group": {
-                "_id": None,
-                "total_oz": {"$sum": "$amount_oz"}
-            }}
+            {"$group": {"_id": None, "total_oz": {"$sum": "$amount_oz"}}}
         ]
         hydration_result = list(hydration_logs_collection.aggregate(hydration_pipeline))
         water = hydration_result[0].get("total_oz", 0) if hydration_result else 0
@@ -515,6 +422,9 @@ Respond with ONLY valid JSON:
             'hydration_oz': targets['hydration_oz'] - water
         }
         
+        # Build summary text
+        summary_parts = [f"{totals[0]:.0f} cal, {totals[1]:.0f}g protein, {totals[2]:.0f}g carbs"]
+        
         return {
             'totals': {
                 'calories': totals[0],
@@ -526,26 +436,26 @@ Respond with ONLY valid JSON:
             },
             'targets': targets,
             'remaining': remaining,
-            'summary': f"{totals[0]:.0f} cal, {totals[1]:.0f}g protein, {totals[2]:.0f}g carbs"
+            'summary': ", ".join(summary_parts)
         }
     
     def _calculate_targets(self, date_obj: date) -> Dict:
         """Calculate daily macro targets based on training"""
         # Get exercise data from workout module
         date_str = date_obj.isoformat()
-        exercise_logs_collection = self.conn["exercise_logs"]
+        exercise_logs_collection = self.db["exercise_logs"]
         exercise_pipeline = [
             {"$match": {"date": date_str}},
             {"$group": {
                 "_id": None,
-                "calories_burned": {"$sum": "$calories_burned"},
-                "duration_minutes": {"$sum": "$duration_minutes"}
+                "total_calories": {"$sum": "$calories_burned"},
+                "total_minutes": {"$sum": "$duration_minutes"}
             }}
         ]
         exercise_result = list(exercise_logs_collection.aggregate(exercise_pipeline))
         if exercise_result:
-            exercise_calories = exercise_result[0].get("calories_burned", 0) or 0
-            exercise_minutes = exercise_result[0].get("duration_minutes", 0) or 0
+            exercise_calories = exercise_result[0].get("total_calories", 0) or 0
+            exercise_minutes = exercise_result[0].get("total_minutes", 0) or 0
         else:
             exercise_calories = 0
             exercise_minutes = 0
@@ -631,7 +541,7 @@ Respond with ONLY valid JSON:
             inline=True
         )
         
-        embed.set_footer(text=f"Last updated: {datetime.now().strftime('%I:%M %p')}")
+        embed.set_footer(text=f"Last updated: {self.get_now_in_timezone().strftime('%I:%M %p')}")
         
         return embed
     

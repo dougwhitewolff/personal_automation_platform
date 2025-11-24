@@ -89,7 +89,7 @@ class OpenAIClient:
         except Exception as e:
             return {"error": str(e)}
 
-    def analyze_image(self, image_bytes: bytes, prompt: str, model: str = "gpt-4o") -> Dict:
+    def analyze_image(self, image_bytes: bytes, prompt: str, model: str = "gpt-5-nano") -> Dict:
         """
         Analyze an image using a vision-capable model.
         """

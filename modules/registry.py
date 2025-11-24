@@ -10,26 +10,32 @@ The registry:
 
 from typing import Dict, List, Optional
 from datetime import date
+from utils.logger import get_logger
 
 
 class ModuleRegistry:
     """Central registry for all automation modules"""
     
-    def __init__(self, conn, openai_client, limitless_client, config: Dict):
+    def __init__(self, db, openai_client, limitless_client, config: Dict, timezone: str = "America/Los_Angeles", rag_service=None):
         """
         Initialize registry and load modules.
         
         Args:
-            conn: Database connection
+            db: MongoDB database instance
             openai_client: OpenAI client instance
             limitless_client: Limitless client instance
             config: Configuration dict from config.yaml
+            timezone: Timezone string (e.g., "America/Los_Angeles") for date calculations
+            rag_service: Optional RAGService instance for automatic vectorization
         """
-        self.conn = conn
+        self.db = db
         self.openai_client = openai_client
         self.limitless_client = limitless_client
         self.config = config
+        self.timezone = timezone
+        self.rag_service = rag_service
         self.modules = []
+        self.logger = get_logger("registry")
         
         self.load_modules()
     
@@ -38,12 +44,16 @@ class ModuleRegistry:
         # Import modules
         from .nutrition import NutritionModule
         from .workout import WorkoutModule
+        from .sleep import SleepModule
+        from .health import HealthModule
         # Add more imports as you create modules
         
         # Map of module names to classes
         available_modules = {
             'nutrition': NutritionModule,
             'workout': WorkoutModule,
+            'sleep': SleepModule,
+            'health': HealthModule,
             # Add more mappings here
         }
         
@@ -53,25 +63,26 @@ class ModuleRegistry:
             
             # Check if module is enabled
             if not module_config.get('enabled', False):
-                print(f"⏭️  Skipping disabled module: {module_name}")
+                self.logger.debug(f"Skipping disabled module: {module_name}")
                 continue
             
             try:
                 # Instantiate module
+                self.logger.info(f"Loading module: {module_name}...")
                 module = ModuleClass(
-                    self.conn,
+                    self.db,
                     self.openai_client,
                     self.limitless_client,
-                    module_config
+                    module_config,
+                    timezone=self.timezone,
+                    rag_service=self.rag_service
                 )
                 
                 self.modules.append(module)
-                print(f"✅ Loaded module: {module.get_name()}")
+                self.logger.info(f"✓ Loaded module: {module.get_name()}")
                 
             except Exception as e:
-                print(f"❌ Failed to load module {module_name}: {e}")
-                import traceback
-                traceback.print_exc()
+                self.logger.error(f"Failed to load module {module_name}: {e}", exc_info=True)
     
     def get_module_by_keyword(self, text: str) -> Optional[object]:
         """

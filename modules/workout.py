@@ -40,33 +40,28 @@ class WorkoutModule(BaseModule):
     
     def setup_database(self):
         """Create exercise tracking collections and indexes"""
-        # Collections are created automatically on first insert
-        # Create indexes for performance
-        
-        # Exercise logs collection
-        exercise_logs = self.conn["exercise_logs"]
-        exercise_logs.create_index("date")
+        # Exercise logs
+        exercise_logs = self.db["exercise_logs"]
+        exercise_logs.create_index([("date", 1), ("timestamp", 1)])
         exercise_logs.create_index("lifelog_id")
         
-        # Training days collection
-        training_days = self.conn["training_days"]
+        # Training days calendar
+        training_days = self.db["training_days"]
         training_days.create_index("date", unique=True)
-        training_days.create_index("primary_exercise_id")
     
     async def handle_log(self, message_content: str, lifelog_id: str, analysis: Dict) -> Dict:
         """Process workout logging"""
         
-        # Get transcript from Limitless (for context)
-        transcript = self.limitless_client.get_todays_transcript()
+        self.logger.info(f"Processing workout log for lifelog_id: {lifelog_id}")
+        
+        # message_content now contains the context transcript (last 5 entries from polling batch)
+        # No need to fetch full day's transcript
         
         # Escaped JSON braces to avoid KeyError during .format()
         prompt = """Extract exercise information from the transcript.
 
 TRANSCRIPT:
 {transcript}
-
-RECENT MESSAGE:
-""" + message_content + """
 
 Respond with ONLY valid JSON:
 {{
@@ -80,61 +75,61 @@ Respond with ONLY valid JSON:
 }}"""
         
         # Perform OpenAI text analysis
+        self.logger.debug(f"Analyzing transcript with OpenAI (length: {len(message_content)} chars)")
         analysis = self.openai_client.analyze_text(
-            transcript=transcript,
+            transcript=message_content,
             module_name=self.get_name(),
             prompt_template=prompt
         )
         
         # Handle invalid or missing detection
         if "error" in analysis or not analysis.get("exercise", {}).get("detected"):
+            self.logger.warning("No exercise detected in transcript")
             return {"embed": self._create_error_embed("No exercise detected")}
         
         # Store exercise data
         exercise = analysis["exercise"]
+        exercise_type = exercise.get("type", "unknown")
+        duration = exercise.get("duration_minutes") or 0
+        calories = exercise.get("calories_burned")
+        self.logger.info(f"Detected exercise: {exercise_type}, {duration} min, {calories} cal")
+        
         exercise_id = self._store_exercise(exercise, lifelog_id)
         
         # Update training day intensity
-        self._update_training_day(date.today(), exercise, exercise_id)
+        self._update_training_day(self.get_today_in_timezone(), exercise, exercise_id)
         
         # Determine electrolyte recommendation
+        # Handle None values from OpenAI (null in JSON becomes None in Python)
+        duration_minutes = exercise.get("duration_minutes") or 0
         needs_electrolytes = (
-            exercise.get("duration_minutes", 0)
-            >= self.config.get("electrolyte_threshold_minutes", 45)
+            duration_minutes >= self.config.get("electrolyte_threshold_minutes", 45)
         )
+        
+        if needs_electrolytes:
+            self.logger.info("Electrolyte recommendation: Yes (45+ min cardio)")
         
         # Create confirmation embed
         embed = self._create_exercise_embed(exercise, needs_electrolytes)
-        return {"embed": embed}
-    
-    async def handle_query(self, query: str, context: Dict) -> str:
-        """Answer workout questions"""
-        from datetime import timedelta
         
-        exercise_logs_collection = self.conn["exercise_logs"]
-        # Get exercises from last 7 days
-        seven_days_ago = (date.today() - timedelta(days=7)).isoformat()
+        # Build what was logged for notifications
+        logged_items = []
+        exercise_type = exercise.get("type", "unknown")
+        duration = exercise.get("duration_minutes") or 0
+        calories = exercise.get("calories_burned")
         
-        exercises_cursor = exercise_logs_collection.find(
-            {"date": {"$gte": seven_days_ago}},
-            {"date": 1, "exercise_type": 1, "duration_minutes": 1, "calories_burned": 1}
-        ).sort("date", -1)
+        logged_items.append(f"{exercise_type.title()} - {duration} min")
+        if calories:
+            logged_items.append(f"{calories} calories")
         
-        exercises = [
-            {
-                "date": ex.get("date"),
-                "type": ex.get("exercise_type"),
-                "duration": ex.get("duration_minutes"),
-                "calories": ex.get("calories_burned")
+        self.logger.info(f"✓ Successfully processed workout log for lifelog_id: {lifelog_id}")
+        return {
+            "embed": embed,
+            "logged_items": logged_items,
+            "logged_data": {
+                "exercise": exercise
             }
-            for ex in exercises_cursor
-        ]
-        
-        return self.openai_client.answer_query(
-            query=query,
-            context={"recent_exercises": exercises},
-            system_prompt="You are a fitness tracking assistant with access to the user's workout history."
-        )
+        }
     
     async def handle_image(self, image_bytes: bytes, context: str) -> Dict:
         """Extract Peloton stats from screenshot"""
@@ -179,12 +174,16 @@ If any field is not visible, use null."""
             }
         
         # Build exercise record
+        # Handle None values from OpenAI (null in JSON becomes None in Python)
+        duration_minutes = analysis.get("duration_minutes") or 0
+        calories = analysis.get("calories")
+        
         exercise_data = {
             "exercise": {
                 "detected": True,
                 "type": "cycling",
-                "duration_minutes": analysis["duration_minutes"],
-                "calories_burned": analysis.get("calories"),
+                "duration_minutes": duration_minutes,
+                "calories_burned": calories,
                 "peloton_data": {
                     "strive_score": analysis.get("strive_score"),
                     "output": analysis.get("output"),
@@ -197,15 +196,31 @@ If any field is not visible, use null."""
         
         # Store immediately (auto-confirmed)
         exercise_id = self._store_exercise(exercise_data["exercise"], "peloton_img")
-        self._update_training_day(date.today(), exercise_data["exercise"], exercise_id)
+        self._update_training_day(self.get_today_in_timezone(), exercise_data["exercise"], exercise_id)
         
+        # Handle None values from OpenAI (null in JSON becomes None in Python)
+        # duration_minutes already extracted above
         needs_electrolytes = (
-            analysis["duration_minutes"]
-            >= self.config.get("electrolyte_threshold_minutes", 45)
+            duration_minutes >= self.config.get("electrolyte_threshold_minutes", 45)
         )
         
         embed = self._create_peloton_embed(analysis, needs_electrolytes)
-        return {"needs_confirmation": False, "embed": embed}
+        
+        # Build what was logged for notifications
+        logged_items = []
+        ride_name = analysis.get('ride_name', 'Ride')
+        logged_items.append(f"Peloton: {ride_name} - {duration_minutes} min")
+        if calories:
+            logged_items.append(f"{calories} calories")
+        
+        return {
+            "needs_confirmation": False,
+            "embed": embed,
+            "logged_items": logged_items,
+            "logged_data": {
+                "exercise": exercise_data["exercise"]
+            }
+        }
     
     def get_scheduled_tasks(self) -> List[Dict]:
         """Workout module does not schedule reminders directly."""
@@ -213,18 +228,15 @@ If any field is not visible, use null."""
     
     async def get_daily_summary(self, date_obj: date) -> Dict:
         """Get workout summary for a specific date."""
-        exercise_logs_collection = self.conn["exercise_logs"]
         date_str = date_obj.isoformat()
+        exercise_logs_collection = self.db["exercise_logs"]
         
-        exercises_cursor = exercise_logs_collection.find(
-            {"date": date_str},
-            {"exercise_type": 1, "duration_minutes": 1, "calories_burned": 1}
-        )
-        
-        exercises = list(exercises_cursor)
+        exercises = list(exercise_logs_collection.find({"date": date_str}))
         if not exercises:
             return {"summary": "Rest day"}
         
+        total_minutes = sum(e.get("duration_minutes", 0) for e in exercises)
+        total_calories = sum(e.get("calories_burned", 0) or 0 for e in exercises)
         total_minutes = sum(e.get("duration_minutes", 0) for e in exercises)
         total_calories = sum(e.get("calories_burned", 0) or 0 for e in exercises)
         
@@ -240,35 +252,51 @@ If any field is not visible, use null."""
     # Helper methods
     # ---------------------------------------------------------------------
     def _store_exercise(self, exercise: Dict, lifelog_id: str) -> str:
+    def _store_exercise(self, exercise: Dict, lifelog_id: str) -> str:
         """Store exercise log and return record ID."""
-        exercise_logs_collection = self.conn["exercise_logs"]
+        self.logger.info(f"Storing exercise: {exercise.get('type')}, "
+                        f"{exercise.get('duration_minutes') or 0} min, "
+                        f"{exercise.get('calories_burned')} cal")
+        
+        exercise_logs_collection = self.db["exercise_logs"]
         peloton = exercise.get("peloton_data", {})
-        today = date.today()
-        now = datetime.now()
+        today = self.get_today_in_timezone()
+        now = self.get_now_in_timezone()
+        
+        # Handle None values from OpenAI (null in JSON becomes None in Python)
+        duration_minutes = exercise.get("duration_minutes") or 0
+        calories_burned = exercise.get("calories_burned")
         
         document = {
             "date": today.isoformat(),
             "timestamp": now.isoformat(),
             "exercise_type": exercise["type"],
-            "duration_minutes": exercise["duration_minutes"],
-            "calories_burned": exercise.get("calories_burned"),
+            "duration_minutes": duration_minutes,
+            "calories_burned": calories_burned,
             "peloton_strive_score": peloton.get("strive_score"),
             "peloton_output": peloton.get("output"),
             "peloton_avg_hr": peloton.get("avg_hr"),
-            "training_zones": json.dumps(peloton.get("training_zones")) if peloton.get("training_zones") else None,
+            "training_zones": peloton.get("training_zones"),  # Store as dict, not JSON string
             "notes": exercise.get("notes"),
             "lifelog_id": lifelog_id,
-            "created_at": now.isoformat()
+            "created_at": now
         }
         
         result = exercise_logs_collection.insert_one(document)
+        self.logger.info(f"✓ Stored exercise log in MongoDB (id: {result.inserted_id})")
+        # Vectorize the exercise record
+        exercise_record = exercise_logs_collection.find_one({"_id": result.inserted_id})
+        if exercise_record:
+            self._vectorize_record(exercise_record, "exercise_logs")
         return str(result.inserted_id)
     
     def _update_training_day(self, date_obj: date, exercise: Dict, exercise_id: str):
+    def _update_training_day(self, date_obj: date, exercise: Dict, exercise_id: str):
         """Update training day intensity based on workout duration."""
-        training_days_collection = self.conn["training_days"]
-        duration = exercise.get("duration_minutes", 0)
-        calories = exercise.get("calories_burned", 0)
+        training_days_collection = self.db["training_days"]
+        # Handle None values from OpenAI (null in JSON becomes None in Python)
+        duration = exercise.get("duration_minutes") or 0
+        calories = exercise.get("calories_burned") or 0
         
         thresholds = self.config.get("intensity_thresholds", {})
         
@@ -279,32 +307,47 @@ If any field is not visible, use null."""
         else:
             intensity = "high"
         
-        training_days_collection.replace_one(
+        self.logger.info(f"Updating training day: {date_obj.isoformat()}, intensity={intensity}, "
+                        f"{calories} cal")
+        
+        training_days_collection.update_one(
             {"date": date_obj.isoformat()},
             {
-                "date": date_obj.isoformat(),
-                "intensity": intensity,
-                "exercise_calories": calories,
-                "primary_exercise_id": exercise_id,
-                "notes": f"Auto: {exercise['type']} ({duration}min)"
+                "$set": {
+                    "date": date_obj.isoformat(),
+                    "intensity": intensity,
+                    "exercise_calories": calories,
+                    "primary_exercise_id": exercise_id,
+                    "notes": f"Auto: {exercise['type']} ({duration}min)"
+                }
             },
             upsert=True
         )
+        self.logger.info(f"✓ Updated training day in MongoDB (date: {date_obj.isoformat()})")
+        # Vectorize the training day record (fetch it after upsert)
+        # Delete existing vectors first since this is an upsert operation
+        training_day_record = training_days_collection.find_one({"date": date_obj.isoformat()})
+        if training_day_record:
+            self._vectorize_record(training_day_record, "training_days", delete_existing=True)
     
     def _create_exercise_embed(self, exercise: Dict, needs_electrolytes: bool):
         """Generate embed confirmation for standard workout logs."""
         import discord  # Local import to avoid audioop issues on Python 3.13
         
+        # Handle None values from OpenAI (null in JSON becomes None in Python)
+        duration_minutes = exercise.get("duration_minutes") or 0
+        calories_burned = exercise.get("calories_burned")
+        
         embed = discord.Embed(
             title="🏋️ Workout Logged!",
-            description=f"**{exercise['type'].title()}** - {exercise['duration_minutes']} minutes",
+            description=f"**{exercise['type'].title()}** - {duration_minutes} minutes",
             color=0x00FF00
         )
         embed.add_field(
             name="📊 Stats",
             value=(
-                f"**Calories:** {exercise.get('calories_burned', 'N/A')}\n"
-                f"**Duration:** {exercise['duration_minutes']} min"
+                f"**Calories:** {calories_burned if calories_burned is not None else 'N/A'}\n"
+                f"**Duration:** {duration_minutes} min"
             ),
             inline=True
         )
@@ -320,9 +363,12 @@ If any field is not visible, use null."""
         """Generate embed confirmation for Peloton logs."""
         import discord  # Local import to avoid audioop issues on Python 3.13
         
+        # Handle None values from OpenAI (null in JSON becomes None in Python)
+        duration_minutes = analysis.get("duration_minutes") or 0
+        
         embed = discord.Embed(
             title="🚴 Peloton Workout Logged!",
-            description=f"**{analysis.get('ride_name', 'Ride')}** - {analysis['duration_minutes']} min",
+            description=f"**{analysis.get('ride_name', 'Ride')}** - {duration_minutes} min",
             color=0xFF6900
         )
         embed.add_field(

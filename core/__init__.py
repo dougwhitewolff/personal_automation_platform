@@ -13,6 +13,7 @@ from .database import init_database
 from .limitless_client import LimitlessClient
 from .openai_client import OpenAIClient
 from .scheduler import Scheduler
+from .orchestrator import AutomationOrchestrator
 
 
 def get_setup_bot():
@@ -30,5 +31,6 @@ __all__ = [
     "LimitlessClient",
     "OpenAIClient",
     "Scheduler",
+    "AutomationOrchestrator",
     "get_setup_bot",
 ]
