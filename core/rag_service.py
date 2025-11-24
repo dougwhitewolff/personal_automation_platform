@@ -23,6 +23,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from pinecone import Pinecone, ServerlessSpec
+from datetime import date, datetime, timedelta
+import re
 import os
 
 
@@ -102,16 +104,8 @@ User's question: {question}
 Answer the question based on the context provided. If the context doesn't have enough information, let the user know what information is missing.""")
         ])
         
-        # Create RAG chain
-        self.rag_chain = (
-            {
-                "context": self.vector_store.as_retriever(search_kwargs={"k": top_k}) | self._format_docs,
-                "question": RunnablePassthrough()
-            }
-            | self.prompt_template
-            | self.llm
-            | StrOutputParser()
-        )
+        # RAG chain will be created dynamically in answer_query to support date filtering
+        self._base_retriever = self.vector_store.as_retriever(search_kwargs={"k": top_k})
     
     def _format_docs(self, docs: List[Any]) -> str:
         """
@@ -140,9 +134,109 @@ Answer the question based on the context provided. If the context doesn't have e
         
         return "\n\n".join(formatted_parts)
     
+    def _parse_date_from_query(self, query: str) -> Optional[str]:
+        """
+        Parse date from query text and return as ISO format string for filtering.
+        
+        Args:
+            query: User's query text
+            
+        Returns:
+            Date string in ISO format (YYYY-MM-DD) or None
+        """
+        if not query:
+            return None
+        
+        text_lower = query.lower().strip()
+        today = date.today()
+        
+        # Check for relative dates
+        if 'yesterday' in text_lower:
+            target_date = today - timedelta(days=1)
+            return target_date.isoformat()
+        elif 'today' in text_lower:
+            return today.isoformat()
+        elif 'tomorrow' in text_lower:
+            target_date = today + timedelta(days=1)
+            return target_date.isoformat()
+        
+        # Check for "X days ago"
+        days_ago_match = re.search(r'(\d+)\s+days?\s+ago', text_lower)
+        if days_ago_match:
+            days = int(days_ago_match.group(1))
+            target_date = today - timedelta(days=days)
+            return target_date.isoformat()
+        
+        # Check for "last week", "last month", etc.
+        if 'last week' in text_lower:
+            target_date = today - timedelta(days=7)
+            return target_date.isoformat()
+        elif 'last month' in text_lower:
+            target_date = today - timedelta(days=30)
+            return target_date.isoformat()
+        
+        # Check for "X weeks ago", "X months ago"
+        weeks_ago_match = re.search(r'(\d+)\s+weeks?\s+ago', text_lower)
+        if weeks_ago_match:
+            weeks = int(weeks_ago_match.group(1))
+            target_date = today - timedelta(days=weeks * 7)
+            return target_date.isoformat()
+        
+        # Check for date patterns
+        # YYYY-MM-DD
+        date_match = re.search(r'(\d{4})-(\d{1,2})-(\d{1,2})', query)
+        if date_match:
+            try:
+                parsed_date = datetime.strptime(date_match.group(0), "%Y-%m-%d").date()
+                return parsed_date.isoformat()
+            except ValueError:
+                pass
+        
+        # MM/DD/YYYY or YYYY/MM/DD
+        date_match = re.search(r'(\d{1,2})/(\d{1,2})/(\d{4})', query)
+        if date_match:
+            try:
+                # Try MM/DD/YYYY first
+                parsed_date = datetime.strptime(date_match.group(0), "%m/%d/%Y").date()
+                return parsed_date.isoformat()
+            except ValueError:
+                try:
+                    # Try YYYY/MM/DD
+                    parsed_date = datetime.strptime(date_match.group(0), "%Y/%m/%d").date()
+                    return parsed_date.isoformat()
+                except ValueError:
+                    pass
+        
+        # Check for month/day patterns like "January 15" or "Jan 15"
+        month_day_match = re.search(r'(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\s+(\d{1,2})', text_lower)
+        if month_day_match:
+            month_str = month_day_match.group(1)
+            day = int(month_day_match.group(2))
+            month_map = {
+                'january': 1, 'jan': 1, 'february': 2, 'feb': 2,
+                'march': 3, 'mar': 3, 'april': 4, 'apr': 4,
+                'may': 5, 'june': 6, 'jun': 6, 'july': 7, 'jul': 7,
+                'august': 8, 'aug': 8, 'september': 9, 'sep': 9, 'sept': 9,
+                'october': 10, 'oct': 10, 'november': 11, 'nov': 11,
+                'december': 12, 'dec': 12
+            }
+            month = month_map.get(month_str)
+            if month:
+                try:
+                    year = today.year
+                    parsed_date = date(year, month, day)
+                    # If the date is in the future, use previous year
+                    if parsed_date > today:
+                        parsed_date = date(year - 1, month, day)
+                    return parsed_date.isoformat()
+                except ValueError:
+                    pass
+        
+        return None
+    
     def answer_query(self, query: str) -> str:
         """
-        Answer a question using RAG.
+        Answer a question using RAG with optional date filtering.
         
         Args:
             query: User's question
@@ -151,7 +245,34 @@ Answer the question based on the context provided. If the context doesn't have e
             Answer string
         """
         try:
-            answer = self.rag_chain.invoke(query)
+            # Parse date from query
+            date_filter = self._parse_date_from_query(query)
+            
+            # Create retriever with date filter if date was found
+            if date_filter:
+                # Create retriever with metadata filter
+                retriever = self.vector_store.as_retriever(
+                    search_kwargs={
+                        "k": self.top_k,
+                        "filter": {"date": {"$eq": date_filter}}
+                    }
+                )
+            else:
+                # Use base retriever without filter
+                retriever = self._base_retriever
+            
+            # Create RAG chain dynamically with the appropriate retriever
+            rag_chain = (
+                {
+                    "context": retriever | self._format_docs,
+                    "question": RunnablePassthrough()
+                }
+                | self.prompt_template
+                | self.llm
+                | StrOutputParser()
+            )
+            
+            answer = rag_chain.invoke(query)
             return answer
         except Exception as e:
             return f"I encountered an error while searching your records: {str(e)}"

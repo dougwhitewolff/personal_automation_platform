@@ -32,29 +32,6 @@ from core import (
 from core.env_loader import get_env, validate_required_vars
 from modules import ModuleRegistry
 
-# Global reference to Discord channel (set after bot is ready)
-_discord_channel = None
-_discord_channel_lock = threading.Lock()
-
-# Global reference to Discord bot's event loop (for thread-safe notifications)
-_discord_bot_loop = None
-_discord_bot_loop_lock = threading.Lock()
-
-def set_discord_channel(channel):
-    """Set the Discord channel for Limitless notifications"""
-    global _discord_channel
-    with _discord_channel_lock:
-        _discord_channel = channel
-        print(f'🔧 DEBUG: Channel set in set_discord_channel: {_discord_channel is not None}')
-
-def set_discord_bot_loop(loop):
-    """Set the Discord bot's event loop for thread-safe notifications"""
-    global _discord_bot_loop
-    with _discord_bot_loop_lock:
-        _discord_bot_loop = loop
-        print(f'🔧 DEBUG: Bot event loop registered: {_discord_bot_loop is not None}')
-
-
 def _create_embeds_from_long_content(content: str, title: str = None, color: int = 0x0099ff, max_length: int = 4096):
     """
     Create one or more Discord embeds from content that may exceed Discord's limits.
@@ -137,105 +114,6 @@ def _create_embeds_from_long_content(content: str, title: str = None, color: int
         embeds.append(embed)
     
     return embeds
-
-
-async def _send_notification_async(embed=None, content=None):
-    """
-    Internal async function to send notification.
-    This runs in the bot's event loop.
-    """
-    global _discord_channel, _discord_channel_lock
-    
-    # Try to get channel immediately
-    channel = None
-    with _discord_channel_lock:
-        channel = _discord_channel
-    
-    # If channel not set, wait up to 5 seconds for bot to connect
-    if channel is None:
-        for attempt in range(50):  # 50 * 0.1s = 5 seconds max wait
-            await asyncio.sleep(0.1)
-            with _discord_channel_lock:
-                channel = _discord_channel
-            if channel is not None:
-                break
-    
-    if channel:
-        try:
-            if embed:
-                await channel.send(embed=embed)
-                title = embed.title if hasattr(embed, 'title') and embed.title else 'Notification'
-                print(f"✅ Sent Discord notification: {title}")
-            elif content:
-                await channel.send(content)
-                preview = content[:50] + "..." if len(content) > 50 else content
-                print(f"✅ Sent Discord notification: {preview}")
-            return True
-        except Exception as e:
-            print(f"❌ Failed to send Discord notification: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    else:
-        # Channel still not available
-        with _discord_channel_lock:
-            current_value = _discord_channel
-        print(f"⚠️  Discord channel not available yet (bot may still be connecting). Notification will be skipped.")
-        print(f"🔧 DEBUG: Channel value is: {current_value} (type: {type(current_value).__name__})")
-        return False
-
-def send_limitless_notification(embed=None, content=None):
-    """
-    Send notification from Limitless polling loop via Discord bot.
-    
-    This function can be called from any thread. It automatically detects if it's
-    being called from the bot's event loop or from another thread (like the polling loop),
-    and handles it appropriately.
-    
-    Returns:
-        bool: True if notification was sent successfully, False otherwise
-    """
-    global _discord_bot_loop, _discord_bot_loop_lock
-    
-    # Check if we're in the bot's event loop
-    try:
-        current_loop = asyncio.get_running_loop()
-        with _discord_bot_loop_lock:
-            bot_loop = _discord_bot_loop
-        
-        # If we're in the bot's loop, we can await directly
-        if bot_loop and current_loop is bot_loop:
-            # We're in the bot's event loop - use await directly
-            # But this function is sync, so we need to handle it differently
-            # Actually, if we're in an async context in the bot's loop, we should use the async version
-            # For now, let's use the thread-safe method for consistency
-            pass
-    except RuntimeError:
-        # No running loop - we're in a sync context
-        pass
-    
-    # Get the bot's event loop
-    with _discord_bot_loop_lock:
-        bot_loop = _discord_bot_loop
-    
-    if bot_loop:
-        # Schedule the coroutine on the bot's event loop from this thread
-        future = asyncio.run_coroutine_threadsafe(
-            _send_notification_async(embed=embed, content=content),
-            bot_loop
-        )
-        try:
-            # Wait for the result (with timeout)
-            return future.result(timeout=10.0)
-        except Exception as e:
-            print(f"❌ Failed to send Discord notification (thread-safe): {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    else:
-        # Bot loop not available yet - try using await_sync as fallback
-        print("⚠️  Bot event loop not available, using fallback method")
-        return await_sync(_send_notification_async(embed=embed, content=content))
 
 
 def load_config() -> dict:
@@ -381,8 +259,6 @@ def polling_loop(limitless_client, registry, db, orchestrator):
     - Marks entries as processed after successful handling
     - Sends webhook notifications for logged items
     """
-    global _discord_channel, _discord_channel_lock  # Need to access global variable
-    
     logger = get_logger("polling")
     poll_interval = int(get_env("POLL_INTERVAL", "10"))  # Default 10 seconds
     timezone = get_env("TIMEZONE", "America/Los_Angeles")
@@ -437,13 +313,18 @@ def polling_loop(limitless_client, registry, db, orchestrator):
                 logger.info(f"🔄 PROCESSING: Entry {lifelog_id} (length: {len(markdown)} chars)")
                 logger.info("=" * 80)
                 
-                # Extract up to 5 sentences before 'log that' to reduce LLM processing
+                # Extract all 'log that' chunks with context
                 extracted_context = extract_context_before_log_that(markdown, max_sentences=5)
+                
+                # If no 'log that' found, mark as processed and skip LLM routing
+                if not extracted_context:
+                    logger.info("📝 No 'log that' found - marking as processed and skipping LLM routing")
+                    mark_entry_processed(db, lifelog_id)
+                    logger.info("=" * 80)
+                    continue
+                
                 logger.info(f"📝 Extracted context (length: {len(extracted_context)} chars, original: {len(markdown)} chars)")
-                if extracted_context != markdown:
-                    logger.info(f"📝 Extracted context preview: {extracted_context[:300]}{'...' if len(extracted_context) > 300 else ''}")
-                else:
-                    logger.info("📝 No 'log that' found - using full markdown")
+                logger.info(f"📝 Extracted context preview: {extracted_context[:300]}{'...' if len(extracted_context) > 300 else ''}")
                 
                 # Route via orchestrator - pass extracted context instead of full markdown
                 logger.debug(f"Routing entry {lifelog_id} via orchestrator")

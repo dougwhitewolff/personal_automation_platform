@@ -175,18 +175,9 @@ def setup_bot(token: str, channel_id: int, registry, db, orchestrator=None):
     @bot.event
     async def on_ready():
         print(f'✅ Discord bot connected as {bot.user}')
-        # Set channel for Limitless notifications
-        from main import set_discord_channel, set_discord_bot_loop
-        channel = bot.get_channel(channel_id)
-        if channel:
-            set_discord_channel(channel)
-            print(f'✅ Discord channel set for Limitless notifications')
-        
-        # Store the bot's event loop for thread-safe notifications
-        set_discord_bot_loop(bot.loop)
-        print(f'✅ Discord bot event loop registered for thread-safe notifications')
         
         # Send online message to channel
+        channel = bot.get_channel(channel_id)
         if channel:
             try:
                 # Use configured timezone for timestamp

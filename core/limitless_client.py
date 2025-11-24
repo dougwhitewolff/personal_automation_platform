@@ -108,7 +108,10 @@ class LimitlessClient:
 
             if response.status_code == 200:
                 data = response.json()
-                return data.get("data", {}).get("lifelogs", data.get("lifelogs", []))
+                lifelogs = data.get("data", {}).get("lifelogs", data.get("lifelogs", []))
+                if not lifelogs:
+                    print("ℹ️  Poll returned no lifelogs (empty result)")
+                return lifelogs
 
             if response.status_code == 429:
                 print("⚠️  Rate limited by Limitless API — backing off for 60s")
@@ -131,7 +134,10 @@ class LimitlessClient:
 
                 if response.status_code == 200:
                     data = response.json()
-                    return data.get("data", {}).get("lifelogs", data.get("lifelogs", []))
+                    lifelogs = data.get("data", {}).get("lifelogs", data.get("lifelogs", []))
+                    if not lifelogs:
+                        print("ℹ️  Poll returned no lifelogs (empty result from fallback)")
+                    return lifelogs
 
             print(f"❌ Limitless API error {response.status_code}: {response.text}")
             return []
@@ -212,14 +218,16 @@ class LimitlessClient:
             List of lifelog entries matching the search query
         """
         # Use today's date with configured timezone
-        today = date.today().isoformat()
-        
+        import pytz
+        tz = pytz.timezone(timezone)
+        today = datetime.now(tz).date().isoformat()
+        print(f"Today: {today}")
         params = {
             "search": query,
             "limit": str(min(limit, 10)),
             "includeMarkdown": "true",
-            # "date": today,
-            # "timezone": timezone,
+            "date": today,
+            "timezone": timezone,
             "direction": direction
         }
 
@@ -233,7 +241,10 @@ class LimitlessClient:
 
             if response.status_code == 200:
                 data = response.json()
-                return data.get("data", {}).get("lifelogs", [])
+                lifelogs = data.get("data", {}).get("lifelogs", [])
+                if not lifelogs:
+                    print(f"ℹ️  Search returned no lifelogs for query: '{query}'")
+                return lifelogs
 
             print(f"❌ Search failed {response.status_code}: {response.text}")
             return []
