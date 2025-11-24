@@ -48,6 +48,7 @@ class BaseModule(ABC):
         self.rag_service = rag_service
         
         # Setup database collections
+        # Setup database collections
         self.setup_database()
         
         # Initialize logger after setup (so we can use get_name() if needed)
@@ -93,10 +94,11 @@ class BaseModule(ABC):
     @abstractmethod
     def setup_database(self):
         """
-        Create database tables needed by this module.
+        Create database collections and indexes needed by this module.
         
-        Called during module initialization. Should create all tables
-        using CREATE TABLE IF NOT EXISTS to be idempotent.
+        Called during module initialization. Should create all collections
+        and indexes. Collections are created automatically on first insert,
+        but indexes should be created here for performance.
         """
         pass
     

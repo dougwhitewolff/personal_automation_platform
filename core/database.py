@@ -3,6 +3,8 @@ Database initialization and management.
 
 Provides MongoDB connection and core collection setup.
 Modules add their own collections via setup_database() method.
+Provides MongoDB connection and core collection setup.
+Modules add their own collections via setup_database() method.
 """
 
 from pymongo import MongoClient
@@ -15,7 +17,9 @@ from urllib.parse import urlparse
 def init_database(mongodb_url: str = None):
     """
     Initialize MongoDB database with core collections.
+    Initialize MongoDB database with core collections.
     
+    Modules will add their own collections via their setup_database() methods.
     Modules will add their own collections via their setup_database() methods.
     
     Args:

@@ -237,6 +237,8 @@ If any field is not visible, use null."""
         
         total_minutes = sum(e.get("duration_minutes", 0) for e in exercises)
         total_calories = sum(e.get("calories_burned", 0) or 0 for e in exercises)
+        total_minutes = sum(e.get("duration_minutes", 0) for e in exercises)
+        total_calories = sum(e.get("calories_burned", 0) or 0 for e in exercises)
         
         summary = f"{len(exercises)} workout(s), {total_minutes} min, {total_calories} cal"
         return {
@@ -249,6 +251,7 @@ If any field is not visible, use null."""
     # ---------------------------------------------------------------------
     # Helper methods
     # ---------------------------------------------------------------------
+    def _store_exercise(self, exercise: Dict, lifelog_id: str) -> str:
     def _store_exercise(self, exercise: Dict, lifelog_id: str) -> str:
         """Store exercise log and return record ID."""
         self.logger.info(f"Storing exercise: {exercise.get('type')}, "
@@ -287,6 +290,7 @@ If any field is not visible, use null."""
             self._vectorize_record(exercise_record, "exercise_logs")
         return str(result.inserted_id)
     
+    def _update_training_day(self, date_obj: date, exercise: Dict, exercise_id: str):
     def _update_training_day(self, date_obj: date, exercise: Dict, exercise_id: str):
         """Update training day intensity based on workout duration."""
         training_days_collection = self.db["training_days"]

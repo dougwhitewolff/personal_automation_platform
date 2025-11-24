@@ -69,7 +69,7 @@ class NutritionModule(BaseModule):
         custom_foods_collection = self.db["custom_foods"]
         custom_foods = self.config.get('custom_foods', [])
         
-        for food in custom_foods:
+        for food in custom_foods_config:
             try:
                 custom_foods_collection.update_one(
                     {"name": food['name']},
@@ -310,6 +310,7 @@ Respond with ONLY valid JSON:
         now = self.get_now_in_timezone()
         
         documents = []
+        documents = []
         for food in foods:
             documents.append({
                 "date": today.isoformat(),
@@ -371,6 +372,7 @@ Respond with ONLY valid JSON:
     
     def _get_daily_summary_internal(self, date_obj: date) -> Dict:
         """Calculate daily totals and progress"""
+        date_str = date_obj.isoformat()
         date_str = date_obj.isoformat()
         
         # Food totals
