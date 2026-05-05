@@ -5,7 +5,7 @@ status: template
 date: 2026-04-28
 ---
 
-# NNN — {{Decision title}}
+# NNN - {{Decision title}}
 
 **Status:** proposed | accepted | superseded
 **Date:** YYYY-MM-DD
@@ -20,20 +20,20 @@ date: 2026-04-28
 
 ## Options
 
-### Option A — {{name}}
+### Option A - {{name}}
 {{One-paragraph description.}}
 
-**Steel-manned reasoning:** {{The strongest case for this option, written as if by its biggest advocate. Include both the "what" and the "why this is actually the best choice" — surface the non-obvious advantages.}}
+**Steel-manned reasoning:** {{The strongest case for this option, written as if by its biggest advocate. Include both the "what" and the "why this is actually the best choice" - surface the non-obvious advantages.}}
 
 **Priors / assumptions this rests on:**
-- {{Assumption 1}} — confidence: high | medium | low
-- {{Assumption 2}} — confidence: high | medium | low
+- {{Assumption 1}} - confidence: high | medium | low
+- {{Assumption 2}} - confidence: high | medium | low
 - {{...}}
 
-### Option B — {{name}}
+### Option B - {{name}}
 {{Same structure.}}
 
-### Option C — {{name}}
+### Option C - {{name}}
 {{Same structure.}}
 
 ## Recommendation

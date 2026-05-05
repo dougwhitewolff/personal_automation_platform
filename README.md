@@ -1,42 +1,79 @@
 # Personal Automation Platform
 
-A personal AI assistant designed to ingest voice transcripts, route them through task pipelines via keyword matching, and act as a productized "assistant in your pocket."
+A shared automation service for apps that need AI-assisted ingestion, classification, workflow execution, and tool actions.
 
-## Status: Greenfield rewrite (started 2026-04-28)
+The first concrete consumer is the CRM via the Plaud voice-capture integration. Other expected consumers include the Mason trades marketing generator and future internal apps or tools.
 
-The previous Python implementation has been wiped from `main`. It is preserved at:
+## Status
+
+Fresh build. This checkout is currently documentation-first; there is no current `backend/`, `frontend/`, Prisma schema, or service implementation code in `main`.
+
+The active direction is not a standalone CRM repo and not a single Plaud feature repo. It is a service layer that can sit behind multiple products.
+
+Accepted stack: TypeScript + Node.js + NestJS, Postgres, Prisma, and Inngest for initial durable workflows. See [docs/decisions/002-service-stack.md](docs/decisions/002-service-stack.md).
+
+Accepted repo structure: single NestJS service package at the repository root for now, API-first and monorepo-ready later. See [docs/decisions/003-repo-structure.md](docs/decisions/003-repo-structure.md).
+
+Accepted multi-tenancy model: app-layer tenant enforcement first, with an RLS-ready schema. See [docs/decisions/004-multi-tenancy-model.md](docs/decisions/004-multi-tenancy-model.md).
+
+Accepted auth/service access model: service-issued API keys first, human auth deferred until the service owns a real UI. See [docs/decisions/005-auth-service-access.md](docs/decisions/005-auth-service-access.md).
+
+## Service Role
+
+This service should own cross-app automation primitives:
+
+- ingestion from external sources such as Plaud emails, webhooks, uploads, forms, or app-originated requests
+- normalization of captured content into structured events
+- AI classification, extraction, summarization, and drafting
+- durable workflow execution and retries
+- review queues and confidence-gated human approval
+- audit trails for what was received, proposed, committed, edited, or discarded
+- tenant-aware configuration and feature flags
+- app adapters that let client products receive results without hardcoding their domain logic into the service core
+
+The CRM, Mason, and future apps should consume the service through explicit APIs/events rather than sharing database internals.
+
+## First Use Case: Plaud To CRM
+
+Plaud-to-CRM is the first implementation target:
+
+- Plaud sends auto-transcription emails to a dedicated email account.
+- The service detects Plaud-origin emails and parses summary/transcript content.
+- Slice 1 routes every capture to review for manual confirmation.
+- Slice 2 adds AI classification, contact/lead resolution, confidence routing, and optional auto-commit.
+- The CRM receives confirmed actions such as log interaction, create lead, update lead fields, create task, or associate with existing lead.
+- Raw transcript text is not stored as a CRM record.
+
+## Other Expected Consumers
+
+Mason trades marketing generator:
+
+- submit business/customer/project context
+- generate marketing copy, ads, landing-page sections, emails, or campaign variants
+- route drafts through review/approval
+- keep reusable prompt and brand context outside the Mason UI
+
+Future apps and tools:
+
+- send work requests into the service
+- receive structured results, status updates, and audit records
+- opt into shared review, workflow, and AI orchestration primitives
+
+## Legacy Code
+
+The previous Python implementation was wiped from `main`. It is preserved at:
+
 - Git tag: `legacy-python-v1`
 - Git branch: `legacy-python-v1`
 
-To inspect the legacy code: `git checkout legacy-python-v1`
-
-## Why the rewrite
-
-The old system was a single-user Python prototype built around the Limitless API, an in-process scheduler, a Discord bot, and a handful of health/nutrition/sleep modules. None of that is central to the new direction:
-
-1. **Switching transcript source from Limitless to Plaud.** Plaud has not yet released their API, so email-with-attachment ingestion is a temporary workaround that will be swapped for the Plaud API when available.
-2. **Designed to productize and scale**, not a personal toy. Multi-tenancy, durable workflows, auth, and billing are first-class concerns from the start (though some are deferred until v1 of the assistant works for one real user — likely the author).
-3. **Stack change** away from Python toward something better suited to a long-running, IO-heavy AI orchestration product with a strong SDK ecosystem.
-
-## What this repo will become
-
-- A multi-tenant backend that ingests voice transcripts (email attachment now, Plaud API later)
-- A keyword-routed pipeline engine that treats each transcript as single-use input to one task pipeline
-- A durable job/workflow layer that can fan out to many tasks per transcript
-- An LLM orchestration layer (Anthropic primary) for understanding transcripts and driving pipelines
-- User-facing surfaces (TBD during planning — web, mobile, Discord, voice are all candidates)
-
-The full product specification will be developed in [docs/PRD.md](docs/PRD.md) through a structured planning session captured in [docs/decisions/](docs/decisions/).
+To inspect the legacy code: `git checkout legacy-python-v1`.
 
 ## Documentation
 
-- [docs/VISION.md](docs/VISION.md) — north star, product framing, what we're building and why
-- [docs/PRD.md](docs/PRD.md) — the consolidated product requirements document (filled in during planning)
-- [docs/decisions/INDEX.md](docs/decisions/INDEX.md) — running list of architecture/product decisions
-- [docs/decisions/000-template.md](docs/decisions/000-template.md) — format used for each decision
-
-## How to resume planning in a new chat
-
-Open a new Claude Code session in this repo and say: *"Resume the PRD planning session. Read docs/VISION.md, docs/PRD.md, and docs/decisions/INDEX.md for context, then continue from the next unanswered question."*
-
-The decision docs are designed to be self-contained: each one captures the question, options considered, steel-manned reasoning, priors on assumptions, recommendation, and final choice — so a fresh session can pick up exactly where the previous one left off.
+- [docs/DEV_HANDOFF_PRD.md](docs/DEV_HANDOFF_PRD.md) - concise developer handoff PRD and current source of truth
+- [docs/PRD.md](docs/PRD.md) - current repo-local product/service summary
+- [docs/VISION.md](docs/VISION.md) - service vision and first use cases
+- [docs/decisions/002-service-stack.md](docs/decisions/002-service-stack.md) - accepted stack decision
+- [docs/decisions/003-repo-structure.md](docs/decisions/003-repo-structure.md) - accepted repo structure decision
+- [docs/decisions/004-multi-tenancy-model.md](docs/decisions/004-multi-tenancy-model.md) - accepted multi-tenancy decision
+- [docs/decisions/005-auth-service-access.md](docs/decisions/005-auth-service-access.md) - accepted auth/service access decision

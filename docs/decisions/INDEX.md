@@ -11,32 +11,35 @@ See [000-template.md](000-template.md).
 | #   | Title | Status | Date |
 |-----|-------|--------|------|
 | 000 | Template | template | 2026-04-28 |
+| 001 | _(unused - number reserved or skipped)_ | - | - |
+| 002 | Service stack | accepted | 2026-05-01 |
+| 003 | Repo structure | accepted | 2026-05-01 |
+| 004 | Multi-tenancy model | accepted | 2026-05-01 |
+| 005 | Auth and service access | accepted | 2026-05-01 |
+| 006 | Mailbox ingestion implementation | deferred | - |
 
-## Planning queue
+## Open Decisions
 
-Questions to work through, in roughly the order they should be resolved (later questions often depend on earlier ones):
+Questions to resolve as implementation gets closer. Later questions may depend on earlier ones. Categorized by handoff impact; see `DEV_HANDOFF_PRD.md` section 15 for the same split with full rationale.
 
-1. **Target user & v1 scope** — who is v1 for, what does "done" mean for v1?
-2. **Primary user surface** — how does the user interact with the assistant (web, Discord, mobile, voice, multi)?
-3. **Language / runtime** — TypeScript on Node, TypeScript on Bun, Go, something else?
-4. **Backend framework** — Hono, Fastify, NestJS, Next.js API routes, etc.
-5. **Workflow / job engine** — Inngest, Temporal, Trigger.dev, Hatchet, BullMQ, roll-our-own?
-6. **Primary database** — Supabase, Neon, Railway PG, self-hosted, etc.
-7. **Vector store** — pgvector, Turbopuffer, Pinecone, etc.
-8. **Multi-tenancy model** — RLS in Postgres, app-layer enforcement, schema-per-tenant?
-9. **Auth provider** — Clerk, WorkOS, Supabase Auth, custom?
-10. **Hosting / deployment** — Fly.io, Railway, Vercel, AWS, etc.
-11. **Email ingestion vendor** — Postmark, AWS SES, SendGrid, Mailgun?
-12. **Transcript source adapter interface** — shape of the abstraction so Plaud API drops in cleanly.
-13. **LLM provider strategy** — Anthropic only, multi-provider abstraction, when to introduce one?
-14. **Pipeline definition format** — code, declarative config, hybrid?
-15. **Keyword routing strategy** — exact match, embedding similarity, LLM classifier, hybrid?
-16. **Memory / retrieval strategy** — what does the assistant remember across transcripts?
-17. **Repo structure** — monorepo (pnpm + turbo) vs. single package?
-18. **Observability stack** — Sentry, Axiom, OTEL, Datadog, etc.
-19. **Secrets management** — Doppler, 1Password, env files, cloud-native?
-20. **CI/CD** — GitHub Actions baseline, anything else?
-21. **When to wire in billing** — never (personal), v1, post-validation?
-22. **Compliance posture** — audio is PII; what's the retention/storage policy?
+### Needed before final parser behavior
 
-This list will be refined as decisions are made — some questions will spawn sub-questions, others may be merged or deferred.
+1. **Plaud email format spec + sample fixtures** - real example Plaud emails (PII scrubbed) under `docs/fixtures/plaud/` plus section 7.3 in the PRD describing the format. Product owner will provide an email to Faiyaz when needed.
+2. **Mailbox ingestion implementation** - default dev mailbox is `doug@4trades.ai`; final access mechanism can be chosen during implementation and isolated behind the ingestion adapter.
+
+### Resolvable during scaffold (defaults set in PRD section 15.2)
+
+3. **Validation library** - default: Zod.
+4. **Testing library** - default: Vitest.
+5. **Review surface for Slice 1** - default: REST endpoints on the service.
+6. **API key issuance flow for Slice 1** - default: `prisma db seed` + `pnpm key:create` CLI script.
+
+### Genuinely deferable
+
+7. **CRM adapter contract** - exact API endpoints/events the CRM exposes for confirmed actions.
+8. **Deployment target** - Fly.io, Railway, Render, AWS, Azure, or another target.
+9. **Retention policy** - how long raw emails/transcripts, summaries, review items, and audit records are retained.
+10. **LLM provider strategy** - OpenAI only, Anthropic only, or multi-provider abstraction for Slice 2.
+11. **Observability, secrets, and CI/CD** - baseline operational tooling for the first deployable service.
+
+This list will be refined as decisions are made. Some questions will spawn sub-questions; others may be merged or deferred.

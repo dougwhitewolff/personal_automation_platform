@@ -1,65 +1,48 @@
 # Vision
 
-## What we're building
+Build a shared automation service that gives our apps a common AI/workflow layer instead of making every product reinvent ingestion, prompting, review, execution, and audit.
 
-A personal AI assistant — initially for the author, ultimately a product — that turns voice transcripts into executed work. You record a thought on a Plaud device, it shows up as a transcript, the system identifies what kind of task it is, and routes it through the appropriate pipeline (which may itself fan out into many sub-tasks).
+The service should feel boring in the right places: tenant-aware, durable, observable, idempotent, and explicit about what it is allowed to do. The intelligence can evolve, but the service contract should stay stable enough that the CRM, Mason, and future tools can depend on it.
 
-The phrase that captures it: *"a personal assistant in your pocket."*
-
-## Core mental model
+## Mental Model
 
 ```
-voice recording
-    ↓ (Plaud device)
-transcript
-    ↓ (Plaud API → eventually; email attachment → for now)
-ingestion layer
-    ↓ (keyword routing)
-task pipeline (single-use per transcript, for now)
-    ↓ (durable workflow execution)
-outcomes (calls made, docs drafted, calendar events created, messages sent, etc.)
+external signal or app request
+    -> ingestion adapter
+    -> normalized capture/event
+    -> parser/classifier/workflow
+    -> review or auto-approved action
+    -> app adapter
+    -> client app outcome
 ```
 
-## Non-negotiables
+## First Consumers
 
-1. **Plaud API ready.** Email ingestion is a workaround. The system must be designed so that swapping email-attachment ingestion for the Plaud API is an adapter swap, not a refactor. The ingestion layer is an interface; email and Plaud are implementations.
+CRM:
 
-2. **Productizable from day one.** Even though v1 will likely have one user (the author), the data model, auth boundaries, and workflow engine choice should not require a rewrite to support a second user. Multi-tenancy is foundational; billing and onboarding polish are deferred.
+- Plaud voice captures become reviewed CRM actions.
+- Later workflows may support email/calendar context, follow-ups, task creation, customer updates, and lead enrichment.
 
-3. **Durable, not best-effort.** Pipelines may take minutes or hours, may call external APIs that fail, may need retries. An in-process scheduler (the old system's approach) is not acceptable. A real workflow engine is required.
+Mason trades marketing generator:
 
-4. **Single-use transcripts (for now).** Each transcript maps to exactly one task pipeline. Multi-pipeline routing per transcript is a future concern and should not complicate v1.
+- Business, trade, project, and customer context becomes marketing drafts.
+- Drafts can be reviewed, revised, approved, and reused across channels.
 
-## What we explicitly are NOT building (yet)
+Future apps and tools:
 
-- Multi-pipeline routing per transcript
-- Real-time conversational interface (the assistant runs asynchronously on transcripts)
-- Mobile app (until we know the right surface)
-- A polished SaaS onboarding flow
-- Custom ML models — all intelligence is via API calls to frontier LLMs
+- Any app can submit a structured automation request and receive status, results, and audit history.
 
-## Why we wiped the previous code
+## Principles
 
-The legacy Python prototype was built around assumptions that no longer hold:
+1. **Service first, app aware.** The core service owns reusable automation primitives. App-specific behavior lives in adapters.
+2. **Tenant boundaries from day one.** Every event, workflow, review item, setting, and action is tenant-scoped.
+3. **Human review where trust is not earned.** Low-confidence or high-impact actions go to review before commit.
+4. **Durable, not best-effort.** Workflows need retries, idempotency, and audit trails.
+5. **No raw content dumping.** Captured content is parsed, summarized, and transformed before it becomes an app record.
+6. **Integrations are replaceable.** Plaud email ingestion is one adapter; future Plaud API support should not require a rewrite.
 
-- **Limitless-first.** We're switching to Plaud.
-- **Single-user, single-process.** Won't scale or productize.
-- **Modules (sleep/nutrition/workout/health) were the product.** They're not — those were experiments. The *platform* is the product, and pipelines are user-defined or app-defined, not hardcoded.
-- **Python.** Acceptable for a prototype, suboptimal for a product that needs durable workflows, strong typing across many integrations, and a long-lived hosted service.
+## First North-Star Workflow
 
-The legacy code is preserved on the `legacy-python-v1` tag and branch. We do not expect to port any of it directly, but a few prompts or schemas may be useful reference.
+A field user records a site visit on Plaud. Plaud emails the transcript to a dedicated email account. The service detects the email, parses the useful content, creates a capture event, routes it to review, and sends the confirmed action to the CRM as a lead note, task, new lead, or lead update.
 
-## North-star use case (for design pressure)
-
-The author records: *"Remind me to follow up with Sarah about the Q3 planning doc next Tuesday, and pull together the latest revenue numbers so I can compare them to what she said in our last call."*
-
-The system should:
-1. Receive the transcript.
-2. Identify this as a "follow-up with prep" pipeline.
-3. Create a calendar reminder for Tuesday.
-4. Search prior transcripts/notes for "Sarah" + "Q3 planning" context.
-5. Pull revenue numbers from a connected data source.
-6. Draft a comparison doc.
-7. Surface the result before Tuesday's reminder fires.
-
-If the architecture can't gracefully express that flow, it's the wrong architecture.
+That workflow is intentionally narrow. It proves the service primitives we will need everywhere else: ingestion, parsing, review, tenant config, workflow state, audit, and app action execution.
