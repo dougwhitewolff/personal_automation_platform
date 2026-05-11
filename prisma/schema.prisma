@@ -1,0 +1,153 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+enum CaptureStatus {
+  RECEIVED
+  PARSED
+  NEEDS_ATTENTION
+}
+
+enum ReviewStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
+}
+
+model Tenant {
+  id          String         @id @default(cuid()) @map("_id")
+  name        String
+  clientEmail String?        @unique
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  apps        ClientApp[]
+  integrations Integration[]
+  captures    CaptureEvent[]
+  reviews     ReviewItem[]
+  audits      AuditEvent[]
+  apiKeys     ServiceApiKey[]
+}
+
+model ClientApp {
+  id        String   @id @default(cuid()) @map("_id")
+  tenantId  String
+  name      String
+  slug      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, slug])
+  @@index([tenantId])
+}
+
+model ServiceApiKey {
+  id          String   @id @default(cuid()) @map("_id")
+  tenantId    String
+  appId       String
+  keyHash     String
+  keyPrefix   String
+  label       String
+  scopes      String[]
+  createdAt   DateTime @default(now())
+  rotatedAt   DateTime?
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, appId])
+}
+
+model Integration {
+  id             String   @id @default(cuid()) @map("_id")
+  tenantId       String
+  appId          String
+  provider       String
+  mailboxAddress String
+  configJson     Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  tenant         Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@unique([provider, mailboxAddress])
+  @@index([tenantId, appId])
+}
+
+model CaptureEvent {
+  id               String        @id @default(cuid()) @map("_id")
+  tenantId         String
+  appId            String
+  integrationId    String?
+  sourceMessageId  String
+  sourceFrom       String
+  sourceTo         String
+  subject          String
+  bodyText         String?
+  bodyHtml         String?
+  summaryText      String?
+  transcriptText   String?
+  attachmentMeta   Json?
+  status           CaptureStatus @default(RECEIVED)
+  parserError      String?
+  receivedAt       DateTime
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  tenant           Tenant        @relation(fields: [tenantId], references: [id])
+  reviews          ReviewItem[]
+  audits           AuditEvent[]
+
+  @@unique([tenantId, sourceMessageId])
+  @@index([tenantId, appId, status])
+}
+
+model ReviewItem {
+  id               String       @id @default(cuid()) @map("_id")
+  tenantId         String
+  appId            String
+  captureEventId   String
+  status           ReviewStatus @default(PENDING)
+  proposedAction   String
+  proposedPayload  Json
+  actorUserId      String?
+  actorEmail       String?
+  decidedAt        DateTime?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+  tenant           Tenant       @relation(fields: [tenantId], references: [id])
+  captureEvent     CaptureEvent @relation(fields: [captureEventId], references: [id])
+
+  @@unique([captureEventId])
+  @@index([tenantId, appId, status])
+}
+
+model AuditEvent {
+  id             String   @id @default(cuid()) @map("_id")
+  tenantId       String
+  appId          String
+  captureEventId String?
+  reviewItemId   String?
+  eventType      String
+  payload        Json?
+  createdAt      DateTime @default(now())
+  tenant         Tenant   @relation(fields: [tenantId], references: [id])
+  captureEvent   CaptureEvent? @relation(fields: [captureEventId], references: [id])
+
+  @@index([tenantId, appId, eventType])
+}
+
+model WorkflowRun {
+  id            String   @id @default(cuid()) @map("_id")
+  tenantId      String
+  appId         String
+  captureEventId String?
+  reviewItemId  String?
+  provider      String
+  providerRunId String
+  createdAt     DateTime @default(now())
+
+  @@index([tenantId, appId])
+  @@unique([provider, providerRunId])
+}

@@ -1,0 +1,38 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../../node_modules/@prisma/outbox-client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL_OUTBOX")
+}
+
+enum OutboxStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+/// Durable inbox→Kafka pipeline: one row per Graph message id (per tenant).
+model OutboxEmail {
+  id               String       @id @default(cuid())
+  tenantId         String       @map("tenant_id")
+  appId            String       @map("app_id")
+  integrationId    String?      @map("integration_id")
+  /// Microsoft Graph message id (or dev synthetic) — inbox polling dedupe key.
+  providerEmailId  String       @map("provider_email_id")
+  /// RFC / internetMessageId — downstream Kafka dedupe key.
+  messageId        String       @map("message_id")
+  emailPayload     Json         @map("email_payload")
+  status           OutboxStatus @default(PENDING)
+  attempts         Int          @default(0)
+  lastError        String?      @map("last_error")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+  publishedAt      DateTime?    @map("published_at")
+
+  @@unique([tenantId, providerEmailId])
+  @@index([status, createdAt])
+  @@map("outbox_emails")
+}
