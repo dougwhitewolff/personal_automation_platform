@@ -1,0 +1,14 @@
+# dependency-watch.ignore
+#
+# Packages intentionally NOT tracked as rows in dependency-watch.csv.
+# Supports exact package names and trailing-* prefix globs. # comments
+# and blank lines are skipped.
+#
+# NOT a place to hide risky deps. Anything that can break a user-facing
+# flow belongs in dependency-watch.csv with a real severity.
+
+# personal_automation_platform is currently a planning repo: docs/PRD,
+# VISION, and architecture decision records only. No service has been
+# scaffolded (no package.json / pyproject.toml / source). Decision 002
+# selects NestJS + Prisma + Postgres + Inngest as the future stack.
+# Re-run the dependency-watch bootstrap once the service scaffold lands.
