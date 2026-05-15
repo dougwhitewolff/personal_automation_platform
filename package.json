@@ -5,15 +5,13 @@
   "private": true,
   "main": "dist/main.js",
   "scripts": {
-    "build": "prisma generate && prisma generate --schema=prisma/outbox/schema.prisma && tsup src/main.ts --format cjs --target node20 --out-dir dist --clean --external @prisma/client --external @prisma/outbox-client",
+    "build": "prisma generate && tsup src/main.ts --format cjs --target node20 --out-dir dist --clean --external @prisma/client",
     "start": "node dist/main.js",
     "start:dev": "tsx watch src/main.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
-    "prisma:outbox:generate": "prisma generate --schema=prisma/outbox/schema.prisma",
-    "prisma:outbox:migrate": "prisma migrate deploy --schema=prisma/outbox/schema.prisma",
     "prisma:seed": "tsx prisma/seed.ts",
     "key:create": "tsx scripts/key-create.ts"
   },

@@ -87,7 +87,7 @@ export class IntegrationsService {
   @Cron(CronExpression.EVERY_5_MINUTES)
   async pollM365Mailbox(): Promise<void> {
     const mailboxAddress = process.env.M365_USER_EMAIL;
-    if (!mailboxAddress) return;
+    if (!mailboxAddress || !this.prisma) return;
 
     const integration = await this.prisma.integration.findFirst({
       where: {

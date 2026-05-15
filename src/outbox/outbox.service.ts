@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import { OutboxPrismaService } from "./outbox-prisma.service";
+import { PrismaService } from "../infrastructure/prisma.service";
 import type { OutboxEmailPayload } from "./outbox-email-payload.type";
 
 export type UpsertIncomingEmailInput = {
@@ -15,13 +15,13 @@ export type UpsertIncomingEmailInput = {
 
 @Injectable()
 export class OutboxService {
-  constructor(private readonly outboxPrisma: OutboxPrismaService) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   /**
    * Idempotent inbox write: same tenant + providerEmailId never creates a second row.
    */
   upsertIncomingEmail(input: UpsertIncomingEmailInput) {
-    return this.outboxPrisma.outboxEmail.upsert({
+    return this.prisma.outboxEmail.upsert({
       where: {
         tenantId_providerEmailId: {
           tenantId: input.tenantId,

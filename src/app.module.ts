@@ -1,7 +1,7 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
 import { ScheduleModule } from "@nestjs/schedule";
-import { PrismaService } from "./infrastructure/prisma.service";
+import { PrismaModule } from "./prisma/prisma.module";
 import { CapturesModule } from "./captures/captures.module";
 import { ReviewsModule } from "./reviews/reviews.module";
 import { IntegrationsModule } from "./integrations/integrations.module";
@@ -14,6 +14,7 @@ import { OutboxModule } from "./outbox/outbox.module";
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     ScheduleModule.forRoot(),
+    PrismaModule,
     OutboxModule,
     IntegrationsModule,
     CapturesModule,
@@ -21,7 +22,6 @@ import { OutboxModule } from "./outbox/outbox.module";
     AuditModule,
     WorkflowsModule,
     AdaptersModule
-  ],
-  providers: [PrismaService]
+  ]
 })
 export class AppModule {}

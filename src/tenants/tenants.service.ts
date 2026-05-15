@@ -6,7 +6,7 @@ export class TenantsService {
   constructor(private readonly prisma: PrismaService) {}
 
   findByClientEmail(clientEmail: string) {
-    return this.prisma.tenant.findFirst({
+    return this.prisma.automationTenant.findFirst({
       where: {
         clientEmail: clientEmail.toLowerCase()
       }

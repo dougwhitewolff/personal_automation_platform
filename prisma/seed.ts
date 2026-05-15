@@ -4,7 +4,7 @@ import { generateApiKey, hashApiKey } from "../src/common/api-key.util";
 const prisma = new PrismaClient();
 
 async function main() {
-  const tenant = await prisma.tenant.upsert({
+  const tenant = await prisma.automationTenant.upsert({
     where: { id: "seed-tenant" },
     update: { clientEmail: "client@example.com" },
     create: { id: "seed-tenant", name: "Default Tenant", clientEmail: "client@example.com" }
@@ -47,7 +47,7 @@ async function main() {
   });
 
   console.log("Seed completed");
-  console.log(`Tenant: ${tenant.id}`);
+  console.log(`Automation tenant (Postgres): ${tenant.id}`);
   console.log(`App: ${app.id}`);
   console.log(`API Key: ${key.plaintext}`);
 }

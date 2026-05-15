@@ -1,0 +1,33 @@
+# Personal automation platform — local PostgreSQL
+#
+# Usage:
+#   docker compose up -d
+#
+# Then in .env set:
+#   DATABASE_URL="postgresql://postgres:postgres@localhost:5434/personal_automation?schema=public"
+#
+# Apply schema:
+#   npx prisma migrate deploy
+#   npm run prisma:seed   # optional
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pap-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: personal_automation
+    ports:
+      - "5434:5432"
+    volumes:
+      - pap_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pap_pg_data:

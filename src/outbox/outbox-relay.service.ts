@@ -1,7 +1,8 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { Cron, CronExpression } from "@nestjs/schedule";
-import { OutboxPrismaService } from "./outbox-prisma.service";
+import { PrismaService } from "../infrastructure/prisma.service";
 import { KafkaProducerService } from "./kafka-producer.service";
+import { extractAddressFromFromHeader } from "./extract-source-email";
 
 /** Placeholder for future enrichment between poll and Kafka. */
 export type OutboxProcessingHook = (row: {
@@ -19,7 +20,7 @@ export class OutboxRelayService {
   private readonly logger = new Logger(OutboxRelayService.name);
 
   constructor(
-    private readonly outboxPrisma: OutboxPrismaService,
+    private readonly prisma: PrismaService,
     private readonly kafka: KafkaProducerService
   ) {}
 
@@ -28,7 +29,7 @@ export class OutboxRelayService {
 
   @Cron(CronExpression.EVERY_MINUTE)
   async relayPendingToKafka(): Promise<void> {
-    if (!this.kafka.enabled) {
+    if (!this.kafka?.enabled) {
       return;
     }
 
@@ -36,7 +37,7 @@ export class OutboxRelayService {
     const maxAttempts = Number(process.env.OUTBOX_RELAY_MAX_ATTEMPTS ?? "15");
     const topic = process.env.KAFKA_OUTBOX_TOPIC ?? "automation.email.outbox.v1";
 
-    const rows = await this.outboxPrisma.outboxEmail.findMany({
+    const rows = await this.prisma.outboxEmail.findMany({
       where: { status: "PENDING" },
       orderBy: { createdAt: "asc" },
       take: Number.isFinite(batchSize) && batchSize > 0 ? batchSize : 20
@@ -75,7 +76,35 @@ export class OutboxRelayService {
           }
         });
 
-        await this.outboxPrisma.outboxEmail.update({
+        const platformTopic = process.env.KAFKA_PLATFORM_EVENTS_TOPIC ?? "automation.platform.events.v1";
+        const crmTenantId =
+          row.crmTenantId ??
+          (await this.resolveCrmTenantIdFromEmailPayload(emailPayload)) ??
+          process.env.CRM_DEMO_TENANT_ID;
+        if (crmTenantId) {
+          await this.kafka.sendJsonRecord({
+            topic: platformTopic,
+            key: row.id,
+            value: {
+              schemaVersion: 1,
+              eventType: "plaud.email.inbound",
+              source: "personal_automation_platform",
+              occurredAt: new Date().toISOString(),
+              correlationId: row.id,
+              tenantId: crmTenantId,
+              payload: {
+                outboxEmailId: row.id,
+                messageId: row.messageId,
+                providerEmailId: row.providerEmailId,
+                appId: row.appId,
+                integrationId: row.integrationId,
+                email: emailPayload
+              }
+            }
+          });
+        }
+
+        await this.prisma.outboxEmail.update({
           where: { id: row.id },
           data: {
             status: "SENT",
@@ -86,7 +115,7 @@ export class OutboxRelayService {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         const nextAttempts = row.attempts + 1;
-        await this.outboxPrisma.outboxEmail.update({
+        await this.prisma.outboxEmail.update({
           where: { id: row.id },
           data: {
             attempts: nextAttempts,
@@ -101,5 +130,24 @@ export class OutboxRelayService {
     if (rows.length > 0) {
       this.logger.log(`Outbox relay processed ${rows.length} row(s)`);
     }
+  }
+
+  /** Resolve CRM tenant UUID from `crm_tenant_email_mappings` using email_payload.from */
+  private async resolveCrmTenantIdFromEmailPayload(emailPayload: unknown): Promise<string | null> {
+    if (!emailPayload || typeof emailPayload !== "object") {
+      return null;
+    }
+    const from = (emailPayload as { from?: unknown }).from;
+    if (typeof from !== "string") {
+      return null;
+    }
+    const sourceEmail = extractAddressFromFromHeader(from);
+    if (!sourceEmail) {
+      return null;
+    }
+    const mapping = await this.prisma.crmTenantEmailMapping.findUnique({
+      where: { sourceEmail }
+    });
+    return mapping?.crmTenantId ?? null;
   }
 }
