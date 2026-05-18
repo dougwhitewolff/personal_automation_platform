@@ -4,6 +4,9 @@
 # Local Claude Code settings
 .claude/
 
+# Node
+node_modules/
+
 # Python
 __pycache__/
 *.py[cod]
