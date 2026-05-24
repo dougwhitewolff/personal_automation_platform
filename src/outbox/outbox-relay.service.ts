@@ -3,6 +3,7 @@ import { Cron, CronExpression } from "@nestjs/schedule";
 import { PrismaService } from "../infrastructure/prisma.service";
 import { KafkaProducerService } from "./kafka-producer.service";
 import { extractAddressFromFromHeader } from "./extract-source-email";
+import { extractTranscriptFromBody } from "../captures/plaud-parser";
 
 /** Placeholder for future enrichment between poll and Kafka. */
 export type OutboxProcessingHook = (row: {
@@ -82,6 +83,7 @@ export class OutboxRelayService {
           (await this.resolveCrmTenantIdFromEmailPayload(emailPayload)) ??
           process.env.CRM_DEMO_TENANT_ID;
         if (crmTenantId) {
+          const transcript = resolvePlatformTranscript(emailPayload);
           await this.kafka.sendJsonRecord({
             topic: platformTopic,
             key: row.id,
@@ -98,6 +100,7 @@ export class OutboxRelayService {
                 providerEmailId: row.providerEmailId,
                 appId: row.appId,
                 integrationId: row.integrationId,
+                ...(transcript ? { transcript } : {}),
                 email: emailPayload
               }
             }
@@ -150,4 +153,18 @@ export class OutboxRelayService {
     });
     return mapping?.crmTenantId ?? null;
   }
+}
+
+function resolvePlatformTranscript(emailPayload: unknown): string | null {
+  if (!emailPayload || typeof emailPayload !== "object") {
+    return null;
+  }
+  const record = emailPayload as { transcript?: unknown; bodyText?: unknown };
+  if (typeof record.transcript === "string" && record.transcript.trim()) {
+    return record.transcript.trim();
+  }
+  if (typeof record.bodyText === "string") {
+    return extractTranscriptFromBody(record.bodyText);
+  }
+  return null;
 }

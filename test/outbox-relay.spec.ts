@@ -121,6 +121,58 @@ describe("OutboxRelayService", () => {
     );
   });
 
+  it("includes payload.transcript on platform events when email_payload has transcript", async () => {
+    const demoTranscript = "Create a lead for Jane Doe at Example Corp.";
+    const row = {
+      id: "o3",
+      tenantId: "t1",
+      crmTenantId: "00000000-0000-0000-0000-000000000001",
+      appId: "a1",
+      integrationId: null,
+      providerEmailId: "graph-msg-3",
+      messageId: "<mid3@example.com>",
+      emailPayload: {
+        from: "Plaud <noreply@plaud.ai>",
+        subject: "Demo",
+        bodyText: `Marker\nThe original audio transcription is as follows:\n${demoTranscript}`,
+        transcript: demoTranscript
+      },
+      status: "PENDING" as const,
+      attempts: 0,
+      lastError: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      publishedAt: null
+    };
+
+    const prisma = {
+      outboxEmail: {
+        findMany: vi.fn().mockResolvedValue([row]),
+        update: vi.fn().mockResolvedValue(row)
+      },
+      crmTenantEmailMapping: { findUnique: vi.fn().mockResolvedValue(null) }
+    };
+
+    const kafka = {
+      enabled: true,
+      sendJsonRecord: vi.fn().mockResolvedValue(undefined)
+    };
+
+    const relay = new OutboxRelayService(prisma as never, kafka as never);
+    await relay.relayPendingToKafka();
+
+    expect(kafka.sendJsonRecord).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "o3",
+        value: expect.objectContaining({
+          payload: expect.objectContaining({
+            transcript: demoTranscript
+          })
+        })
+      })
+    );
+  });
+
   it("skips when Kafka is disabled", async () => {
     const sendJsonRecord = vi.fn();
     const relay = new OutboxRelayService({ outboxEmail: { findMany: vi.fn() } } as never, {

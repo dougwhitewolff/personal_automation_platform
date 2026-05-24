@@ -46,7 +46,8 @@ export function fallbackSourceMessageId(input: {
     .digest("hex");
 }
 
-function extractTranscriptFromBody(bodyText?: string): string | null {
+/** Extract spoken transcript from a Plaud email body (after the standard marker). */
+export function extractTranscriptFromBody(bodyText?: string): string | null {
   if (!bodyText) return null;
   const marker = "The original audio transcription is as follows:";
   const idx = bodyText.indexOf(marker);
