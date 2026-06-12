@@ -1,12 +1,14 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { Cron, CronExpression } from "@nestjs/schedule";
 import { PrismaService } from "../infrastructure/prisma.service";
-import { AuthContext } from "../common/auth-context.type";
 import { M365GraphClient } from "./m365/m365-graph.client";
-import { TenantsService } from "../tenants/tenants.service";
 import { OutboxService } from "../outbox/outbox.service";
 import { normalizedEmailToOutboxPayload } from "../outbox/to-outbox-payload";
 import { stableDevProviderEmailId } from "../outbox/stable-dev-id";
+import { decodeAttachmentTextContent } from "./decode-attachment-text";
+import { getPlaudSenderEmailFromEnv, matchesPlaudSender } from "./plaud-sender";
+import { PLATFORM_APP_ID } from "../common/platform-constants";
+import { resolveCrmTenantIdFromEmailFrom } from "../tenant-router/resolve-crm-tenant";
 import type { NormalizedEmail } from "./normalized-email.type";
 
 @Injectable()
@@ -16,41 +18,32 @@ export class IntegrationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly outboxService: OutboxService,
-    private readonly graphClient: M365GraphClient,
-    private readonly tenantsService: TenantsService
+    private readonly graphClient: M365GraphClient
   ) {}
 
-  async ingestDevPayload(
-    ctx: AuthContext,
-    payload: {
-      messageId?: string;
-      /** Simulate Microsoft Graph message id for dedupe (optional). */
-      providerEmailId?: string;
-      from: string;
-      to: string;
-      subject: string;
-      bodyText?: string;
-      bodyHtml?: string;
-      attachments?: Array<{ filename: string; contentType?: string; textContent?: string; size?: number }>;
-    }
-  ) {
-    const integration = await this.prisma.integration.findFirst({
-      where: {
-        tenantId: ctx.tenantId,
-        appId: ctx.appId,
-        provider: "m365-graph",
-        mailboxAddress: payload.to
-      }
+  async ingestDevPayload(payload: {
+    messageId?: string;
+    providerEmailId?: string;
+    from: string;
+    to: string;
+    subject: string;
+    bodyText?: string;
+    bodyHtml?: string;
+    attachments?: Array<{ filename: string; contentType?: string; textContent?: string; size?: number }>;
+  }) {
+    const mailboxAddress = payload.to.trim().toLowerCase();
+    const mailbox = await this.prisma.mailboxWatch.findUnique({
+      where: { mailboxAddress }
     });
 
-    if (!integration) {
-      throw new Error(`No integration for mailbox ${payload.to}`);
+    if (!mailbox) {
+      throw new Error(`No mailbox watch configured for ${payload.to}`);
     }
 
     const providerEmailId =
       payload.providerEmailId?.trim() ||
       stableDevProviderEmailId([
-        ctx.tenantId,
+        mailbox.id,
         payload.messageId ?? "",
         payload.from,
         payload.to,
@@ -74,10 +67,16 @@ export class IntegrationsService {
       rawSourceRef: "dev-post"
     });
 
+    const crmTenantId =
+      (await resolveCrmTenantIdFromEmailFrom(this.prisma, payload.from)) ??
+      process.env.CRM_DEMO_TENANT_ID?.trim() ??
+      undefined;
+
     return this.outboxService.upsertIncomingEmail({
-      tenantId: ctx.tenantId,
-      appId: ctx.appId,
-      integrationId: integration.id,
+      tenantId: mailbox.id,
+      appId: PLATFORM_APP_ID,
+      mailboxWatchId: mailbox.id,
+      crmTenantId,
       providerEmailId,
       messageId,
       emailPayload: normalizedEmailToOutboxPayload(email)
@@ -86,87 +85,109 @@ export class IntegrationsService {
 
   @Cron(CronExpression.EVERY_5_MINUTES)
   async pollM365Mailbox(): Promise<void> {
-    const mailboxAddress = process.env.M365_USER_EMAIL;
-    if (!mailboxAddress || !this.prisma) return;
-
-    const integration = await this.prisma.integration.findFirst({
-      where: {
-        provider: "m365-graph",
-        mailboxAddress
-      }
+    const watches = await this.prisma.mailboxWatch.findMany({
+      where: { enabled: true },
+      orderBy: { mailboxAddress: "asc" }
     });
-    if (!integration) return;
 
-    const messages = await this.graphClient.fetchRecentMessages(mailboxAddress);
-    for (const message of messages) {
-      const graphMessageId = message.id;
-      if (!graphMessageId) {
-        this.logger.warn("Skipping message with no Graph id");
-        continue;
-      }
-
-      const recipients = (message.toRecipients ?? [])
-        .map((recipient) => this.normalizeEmail(recipient.emailAddress?.address))
-        .filter((recipient): recipient is string => Boolean(recipient));
-      const clientRecipient = recipients.find((recipient) => recipient !== this.normalizeEmail(mailboxAddress));
-      if (!clientRecipient) {
-        this.logger.warn(`Message ${graphMessageId} skipped: no client recipient in toRecipients`);
-        continue;
-      }
-
-      const tenant = await this.tenantsService.findByClientEmail(clientRecipient);
-      if (!tenant) {
-        this.logger.warn(`Message ${graphMessageId} skipped: no tenant for client email ${clientRecipient}`);
-        continue;
-      }
-
-      const app = await this.prisma.clientApp.findFirst({
-        where: { tenantId: tenant.id },
-        orderBy: { createdAt: "asc" }
-      });
-      if (!app) {
-        this.logger.warn(`Message ${graphMessageId} skipped: tenant ${tenant.id} has no app`);
-        continue;
-      }
-
-      const attachments = await this.graphClient.fetchAttachments(mailboxAddress, graphMessageId);
-      const decodedAttachments = attachments.map((attachment) => ({
-        filename: attachment.name ?? "unknown.txt",
-        contentType: attachment.contentType ?? "application/octet-stream",
-        size: attachment.size ?? 0,
-        textContent: attachment.contentBytes
-          ? Buffer.from(attachment.contentBytes, "base64").toString("utf8")
-          : undefined
-      }));
-
-      const messageId =
-        message.internetMessageId?.trim() ||
-        `<graph-${graphMessageId.replace(/[^a-zA-Z0-9.@_-]+/g, "_")}@local.invalid>`;
-
-      const email: NormalizedEmail = {
-        messageId,
-        from: message.from?.emailAddress?.address ?? "",
-        to: clientRecipient,
-        subject: message.subject ?? "",
-        headers: {},
-        bodyText: message.bodyPreview ?? undefined,
-        bodyHtml: message.body?.contentType === "html" ? message.body.content : undefined,
-        receivedAt: message.receivedDateTime ? new Date(message.receivedDateTime) : new Date(),
-        rawSourceRef: `graph:${graphMessageId}`,
-        attachments: decodedAttachments
-      };
-
-      await this.outboxService.upsertIncomingEmail({
-        tenantId: tenant.id,
-        appId: app.id,
-        integrationId: integration.id,
-        providerEmailId: graphMessageId,
-        messageId,
-        emailPayload: normalizedEmailToOutboxPayload(email)
-      });
+    if (watches.length === 0) {
+      return;
     }
 
-    this.logger.log(`Polled ${messages.length} messages from M365`);
+    const plaudSenderEmail = getPlaudSenderEmailFromEnv();
+    let totalIngested = 0;
+
+    for (const watch of watches) {
+      const credentials = {
+        m365TenantId: watch.m365TenantId,
+        m365ClientId: watch.m365ClientId,
+        m365ClientSecret: watch.m365ClientSecret
+      };
+
+      const messages = await this.graphClient.fetchRecentMessages(credentials, watch.mailboxAddress);
+      let ingestedForWatch = 0;
+
+      for (const message of messages) {
+        const graphMessageId = message.id;
+        if (!graphMessageId) {
+          this.logger.warn(`Skipping message with no Graph id (${watch.mailboxAddress})`);
+          continue;
+        }
+
+        const fromAddress = message.from?.emailAddress?.address ?? "";
+        if (plaudSenderEmail && !matchesPlaudSender(fromAddress, plaudSenderEmail)) {
+          continue;
+        }
+
+        try {
+          const attachments = await this.graphClient.fetchAttachments(
+            credentials,
+            watch.mailboxAddress,
+            graphMessageId
+          );
+          const decodedAttachments = attachments.map((attachment) => {
+            const contentType = attachment.contentType ?? "application/octet-stream";
+            return {
+              filename: attachment.name ?? "unknown.txt",
+              contentType,
+              size: attachment.size ?? 0,
+              textContent: attachment.contentBytes
+                ? decodeAttachmentTextContent(attachment.contentBytes, contentType)
+                : undefined
+            };
+          });
+
+          const messageId =
+            message.internetMessageId?.trim() ||
+            `<graph-${graphMessageId.replace(/[^a-zA-Z0-9.@_-]+/g, "_")}@local.invalid>`;
+
+          const email: NormalizedEmail = {
+            messageId,
+            from: fromAddress,
+            to: watch.mailboxAddress,
+            subject: message.subject ?? "",
+            headers: {},
+            bodyText: message.bodyPreview ?? undefined,
+            bodyHtml: message.body?.contentType === "html" ? message.body.content : undefined,
+            receivedAt: message.receivedDateTime ? new Date(message.receivedDateTime) : new Date(),
+            rawSourceRef: `graph:${graphMessageId}`,
+            attachments: decodedAttachments
+          };
+
+          const crmTenantId =
+            (await resolveCrmTenantIdFromEmailFrom(this.prisma, fromAddress)) ??
+            process.env.CRM_DEMO_TENANT_ID?.trim() ??
+            undefined;
+
+          await this.outboxService.upsertIncomingEmail({
+            tenantId: watch.id,
+            appId: PLATFORM_APP_ID,
+            mailboxWatchId: watch.id,
+            crmTenantId,
+            providerEmailId: graphMessageId,
+            messageId,
+            emailPayload: normalizedEmailToOutboxPayload(email)
+          });
+          ingestedForWatch += 1;
+        } catch (error) {
+          const subject = message.subject ?? "(no subject)";
+          this.logger.error(
+            `Failed to ingest Graph message ${graphMessageId} (${subject}) for ${watch.mailboxAddress}: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        }
+      }
+
+      totalIngested += ingestedForWatch;
+      this.logger.log(
+        `Polled ${messages.length} messages from ${watch.mailboxAddress}; ingested ${ingestedForWatch} Plaud message(s)`
+      );
+    }
+
+    if (totalIngested > 0) {
+      this.logger.log(`Mailbox poll complete; ingested ${totalIngested} message(s) across ${watches.length} watch(es)`);
+    }
   }
 
   private buildNormalizedEmail(input: {
@@ -196,9 +217,5 @@ export class IntegrationsService {
         size: a.size ?? a.textContent?.length ?? 0
       }))
     };
-  }
-
-  private normalizeEmail(email?: string | null): string | undefined {
-    return email?.trim().toLowerCase() || undefined;
   }
 }

@@ -1,19 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
 import { IntegrationsService } from "../src/integrations/integrations.service";
 
-describe("integrations tenant resolution", () => {
-  it("uses client recipient to resolve tenant for polled messages", async () => {
+describe("integrations mailbox poll", () => {
+  it("ingests Plaud messages for each enabled mailbox watch", async () => {
+    const watch = {
+      id: "watch-1",
+      mailboxAddress: "faiyaz@4trades.ai",
+      m365TenantId: "azure-tenant",
+      m365ClientId: "client-id",
+      m365ClientSecret: "client-secret",
+      enabled: true
+    };
+
     const prisma = {
-      integration: {
-        findFirst: vi.fn().mockResolvedValue({
-          id: "integration-1",
-          tenantId: "seed-tenant",
-          appId: "seed-app",
-          mailboxAddress: "our-inbox@example.com"
-        })
+      mailboxWatch: {
+        findMany: vi.fn().mockResolvedValue([watch])
       },
-      clientApp: {
-        findFirst: vi.fn().mockResolvedValue({ id: "client-app-1", tenantId: "tenant-client" })
+      tenantRouter: {
+        findUnique: vi.fn().mockResolvedValue({
+          crmTenantId: "00000000-0000-0000-0000-000000000001"
+        })
       }
     };
     const outboxService = { upsertIncomingEmail: vi.fn().mockResolvedValue({ id: "ob1" }) };
@@ -22,37 +28,50 @@ describe("integrations tenant resolution", () => {
         {
           id: "msg-1",
           internetMessageId: "<id-1>",
-          from: { emailAddress: { address: "plaud@example.com" } },
-          toRecipients: [
-            { emailAddress: { address: "our-inbox@example.com" } },
-            { emailAddress: { address: "client@example.com" } }
-          ],
+          from: { emailAddress: { address: "no-reply@plaud.ai" } },
           subject: "Plaud summary",
-          bodyPreview: "body"
+          bodyPreview:
+            "The transcript is brief, no summary is needed. The original audio transcription is as follows:\nSpeaker 1 00:00:01\nWell, that worked great."
+        },
+        {
+          id: "msg-ms",
+          from: { emailAddress: { address: "Microsoft365@communication.microsoft.com" } },
+          subject: "Get work done on the go"
         }
       ]),
-      fetchAttachments: vi.fn().mockResolvedValue([])
-    };
-    const tenantsService = {
-      findByClientEmail: vi.fn().mockResolvedValue({ id: "tenant-client" })
+      fetchAttachments: vi.fn().mockResolvedValue([
+        {
+          name: "transcript.txt",
+          contentType: "text/plain",
+          size: 448,
+          contentBytes: Buffer.from("Well, that worked great.", "utf8").toString("base64")
+        }
+      ])
     };
 
-    const service = new IntegrationsService(prisma as never, outboxService as never, graphClient as never, tenantsService as never);
+    const service = new IntegrationsService(prisma as never, outboxService as never, graphClient as never);
 
-    vi.stubEnv("M365_USER_EMAIL", "our-inbox@example.com");
+    vi.stubEnv("PLAUD_SENDER_EMAIL", "no-reply@plaud.ai");
     await service.pollM365Mailbox();
     vi.unstubAllEnvs();
 
-    expect(tenantsService.findByClientEmail).toHaveBeenCalledWith("client@example.com");
+    expect(graphClient.fetchRecentMessages).toHaveBeenCalledWith(
+      {
+        m365TenantId: watch.m365TenantId,
+        m365ClientId: watch.m365ClientId,
+        m365ClientSecret: watch.m365ClientSecret
+      },
+      watch.mailboxAddress
+    );
+    expect(outboxService.upsertIncomingEmail).toHaveBeenCalledTimes(1);
     expect(outboxService.upsertIncomingEmail).toHaveBeenCalledWith(
       expect.objectContaining({
-        tenantId: "tenant-client",
-        appId: "client-app-1",
+        tenantId: "watch-1",
+        appId: "platform",
+        mailboxWatchId: "watch-1",
+        crmTenantId: "00000000-0000-0000-0000-000000000001",
         providerEmailId: "msg-1",
-        messageId: "<id-1>",
-        emailPayload: expect.objectContaining({
-          to: "client@example.com"
-        })
+        messageId: "<id-1>"
       })
     );
   });

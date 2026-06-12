@@ -13,7 +13,10 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "tsx prisma/seed.ts",
-    "key:create": "tsx scripts/key-create.ts"
+    "plaud:tier1": "tsx scripts/plaud-tier1-test-seed.ts",
+    "plaud:tier1:list": "tsx scripts/plaud-tier1-test-seed.ts list",
+    "plaud:tier1:happy": "tsx scripts/plaud-tier1-test-seed.ts run --suite=happy-path",
+    "plaud:tier1:edge": "tsx scripts/plaud-tier1-test-seed.ts run --suite=edge-cases"
   },
   "repository": {
     "type": "git",

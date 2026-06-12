@@ -2,15 +2,20 @@ import { Injectable, Logger } from "@nestjs/common";
 import { Cron, CronExpression } from "@nestjs/schedule";
 import { PrismaService } from "../infrastructure/prisma.service";
 import { KafkaProducerService } from "./kafka-producer.service";
-import { extractAddressFromFromHeader } from "./extract-source-email";
-import { extractTranscriptFromBody } from "../captures/plaud-parser";
+import { extractTranscriptFromBody, parsePlaudEmail } from "../captures/plaud-parser";
+import { resolveCrmTenantIdFromEmailFrom } from "../tenant-router/resolve-crm-tenant";
+import {
+  extractFromFromEmailPayload,
+  getPlaudSenderEmailFromEnv,
+  matchesPlaudSender
+} from "../integrations/plaud-sender";
 
 /** Placeholder for future enrichment between poll and Kafka. */
 export type OutboxProcessingHook = (row: {
   id: string;
   tenantId: string;
   appId: string;
-  integrationId: string | null;
+  mailboxWatchId: string | null;
   messageId: string;
   providerEmailId: string;
   emailPayload: unknown;
@@ -36,7 +41,12 @@ export class OutboxRelayService {
 
     const batchSize = Number(process.env.OUTBOX_RELAY_BATCH_SIZE ?? "20");
     const maxAttempts = Number(process.env.OUTBOX_RELAY_MAX_ATTEMPTS ?? "15");
-    const topic = process.env.KAFKA_OUTBOX_TOPIC ?? "automation.email.outbox.v1";
+    const platformTopic = process.env.KAFKA_PLATFORM_EVENTS_TOPIC ?? "automation.platform.events.v1";
+    const plaudSenderEmail = getPlaudSenderEmailFromEnv();
+
+    if (!plaudSenderEmail) {
+      this.logger.warn("PLAUD_SENDER_EMAIL is not set; outbox rows will not be published to Kafka");
+    }
 
     const rows = await this.prisma.outboxEmail.findMany({
       where: { status: "PENDING" },
@@ -52,7 +62,7 @@ export class OutboxRelayService {
             id: row.id,
             tenantId: row.tenantId,
             appId: row.appId,
-            integrationId: row.integrationId,
+            mailboxWatchId: row.mailboxWatchId,
             messageId: row.messageId,
             providerEmailId: row.providerEmailId,
             emailPayload: row.emailPayload
@@ -62,50 +72,51 @@ export class OutboxRelayService {
           }
         }
 
-        const kafkaKey = `${row.tenantId}:${row.messageId}`;
-        await this.kafka.sendJsonRecord({
-          topic,
-          key: kafkaKey,
-          value: {
-            messageId: row.messageId,
-            tenantId: row.tenantId,
-            appId: row.appId,
-            integrationId: row.integrationId,
-            outboxEmailId: row.id,
-            providerEmailId: row.providerEmailId,
-            email: emailPayload
-          }
-        });
+        const fromHeader = extractFromFromEmailPayload(emailPayload);
+        if (!matchesPlaudSender(fromHeader, plaudSenderEmail)) {
+          await this.prisma.outboxEmail.update({
+            where: { id: row.id },
+            data: {
+              status: "SENT",
+              lastError: null
+            }
+          });
+          this.logger.debug(
+            `Skipped Kafka publish for ${row.id}: sender does not match PLAUD_SENDER_EMAIL`
+          );
+          continue;
+        }
 
-        const platformTopic = process.env.KAFKA_PLATFORM_EVENTS_TOPIC ?? "automation.platform.events.v1";
         const crmTenantId =
           row.crmTenantId ??
           (await this.resolveCrmTenantIdFromEmailPayload(emailPayload)) ??
           process.env.CRM_DEMO_TENANT_ID;
-        if (crmTenantId) {
-          const transcript = resolvePlatformTranscript(emailPayload);
-          await this.kafka.sendJsonRecord({
-            topic: platformTopic,
-            key: row.id,
-            value: {
-              schemaVersion: 1,
-              eventType: "plaud.email.inbound",
-              source: "personal_automation_platform",
-              occurredAt: new Date().toISOString(),
-              correlationId: row.id,
-              tenantId: crmTenantId,
-              payload: {
-                outboxEmailId: row.id,
-                messageId: row.messageId,
-                providerEmailId: row.providerEmailId,
-                appId: row.appId,
-                integrationId: row.integrationId,
-                ...(transcript ? { transcript } : {}),
-                email: emailPayload
-              }
-            }
-          });
+        if (!crmTenantId) {
+          throw new Error("No CRM tenant id for Plaud email (set CRM_DEMO_TENANT_ID or tenant_routers)");
         }
+
+        const transcript = resolvePlatformTranscript(emailPayload);
+        await this.kafka.sendJsonRecord({
+          topic: platformTopic,
+          key: row.id,
+          value: {
+            schemaVersion: 1,
+            eventType: "plaud.email.inbound",
+            source: "personal_automation_platform",
+            occurredAt: new Date().toISOString(),
+            correlationId: row.id,
+            tenantId: crmTenantId,
+            payload: {
+              outboxEmailId: row.id,
+              messageId: row.messageId,
+              providerEmailId: row.providerEmailId,
+              appId: row.appId,
+              mailboxWatchId: row.mailboxWatchId,
+              ...(transcript ? { transcript } : {}),
+              email: emailPayload
+            }
+          }
+        });
 
         await this.prisma.outboxEmail.update({
           where: { id: row.id },
@@ -135,7 +146,6 @@ export class OutboxRelayService {
     }
   }
 
-  /** Resolve CRM tenant UUID from `crm_tenant_email_mappings` using email_payload.from */
   private async resolveCrmTenantIdFromEmailPayload(emailPayload: unknown): Promise<string | null> {
     if (!emailPayload || typeof emailPayload !== "object") {
       return null;
@@ -144,14 +154,7 @@ export class OutboxRelayService {
     if (typeof from !== "string") {
       return null;
     }
-    const sourceEmail = extractAddressFromFromHeader(from);
-    if (!sourceEmail) {
-      return null;
-    }
-    const mapping = await this.prisma.crmTenantEmailMapping.findUnique({
-      where: { sourceEmail }
-    });
-    return mapping?.crmTenantId ?? null;
+    return resolveCrmTenantIdFromEmailFrom(this.prisma, from);
   }
 }
 
@@ -159,9 +162,29 @@ function resolvePlatformTranscript(emailPayload: unknown): string | null {
   if (!emailPayload || typeof emailPayload !== "object") {
     return null;
   }
-  const record = emailPayload as { transcript?: unknown; bodyText?: unknown };
+  const record = emailPayload as {
+    transcript?: unknown;
+    bodyText?: unknown;
+    from?: unknown;
+    subject?: unknown;
+    attachments?: Array<{ filename?: string; textContent?: string }>;
+  };
   if (typeof record.transcript === "string" && record.transcript.trim()) {
     return record.transcript.trim();
+  }
+  if (typeof record.from === "string" && typeof record.subject === "string") {
+    const parsed = parsePlaudEmail({
+      from: record.from,
+      subject: record.subject,
+      bodyText: typeof record.bodyText === "string" ? record.bodyText : undefined,
+      attachments: (record.attachments ?? []).map((attachment) => ({
+        filename: attachment.filename ?? "",
+        textContent: attachment.textContent
+      }))
+    });
+    if (parsed.isPlaud && parsed.transcriptText) {
+      return parsed.transcriptText;
+    }
   }
   if (typeof record.bodyText === "string") {
     return extractTranscriptFromBody(record.bodyText);

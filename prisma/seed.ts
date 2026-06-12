@@ -1,55 +1,68 @@
-import { PrismaClient } from "@prisma/client";
-import { generateApiKey, hashApiKey } from "../src/common/api-key.util";
+import { PrismaClient, TenantRouteKind } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
 async function main() {
-  const tenant = await prisma.automationTenant.upsert({
-    where: { id: "seed-tenant" },
-    update: { clientEmail: "client@example.com" },
-    create: { id: "seed-tenant", name: "Default Tenant", clientEmail: "client@example.com" }
-  });
+  const mailboxAddress = process.env.M365_USER_EMAIL?.trim().toLowerCase();
+  const m365TenantId = process.env.M365_TENANT_ID?.trim();
+  const m365ClientId = process.env.M365_CLIENT_ID?.trim();
+  const m365ClientSecret = process.env.M365_CLIENT_SECRET?.trim();
 
-  const app = await prisma.clientApp.upsert({
-    where: { tenantId_slug: { tenantId: tenant.id, slug: "crm" } },
-    update: {},
-    create: {
-      tenantId: tenant.id,
-      name: "CRM",
-      slug: "crm"
-    }
-  });
+  if (mailboxAddress && m365TenantId && m365ClientId && m365ClientSecret) {
+    const watch = await prisma.mailboxWatch.upsert({
+      where: { mailboxAddress },
+      update: {
+        m365TenantId,
+        m365ClientId,
+        m365ClientSecret,
+        enabled: true,
+        label: "Seed mailbox watch"
+      },
+      create: {
+        mailboxAddress,
+        m365TenantId,
+        m365ClientId,
+        m365ClientSecret,
+        enabled: true,
+        label: "Seed mailbox watch"
+      }
+    });
+    console.log(`Mailbox watch: ${watch.mailboxAddress} (${watch.id})`);
+  } else {
+    console.warn(
+      "Skipped mailbox_watches seed — set M365_USER_EMAIL, M365_TENANT_ID, M365_CLIENT_ID, M365_CLIENT_SECRET"
+    );
+  }
 
-  await prisma.integration.upsert({
-    where: { provider_mailboxAddress: { provider: "m365-graph", mailboxAddress: "doug@4trades.ai" } },
-    update: { tenantId: tenant.id, appId: app.id },
-    create: {
-      tenantId: tenant.id,
-      appId: app.id,
-      provider: "m365-graph",
-      mailboxAddress: "doug@4trades.ai"
-    }
-  });
+  const plaudSenderEmail =
+    process.env.PLAUD_SENDER_EMAIL?.trim().toLowerCase() ?? "no-reply@plaud.ai";
+  const crmTenantId = process.env.CRM_DEMO_TENANT_ID?.trim();
 
-  const key = generateApiKey();
-  const salt = process.env.SERVICE_API_KEY_SALT ?? "dev-salt";
-  const keyHash = hashApiKey(key.plaintext, salt);
-
-  await prisma.serviceApiKey.create({
-    data: {
-      tenantId: tenant.id,
-      appId: app.id,
-      keyHash,
-      keyPrefix: key.prefix,
-      label: "seed-key",
-      scopes: ["reviews:read", "reviews:write", "ingest:write"]
-    }
-  });
+  if (crmTenantId) {
+    const router = await prisma.tenantRouter.upsert({
+      where: {
+        routeKind_routeKey: {
+          routeKind: TenantRouteKind.email,
+          routeKey: plaudSenderEmail
+        }
+      },
+      update: {
+        crmTenantId,
+        label: "Plaud sender → CRM tenant"
+      },
+      create: {
+        routeKind: TenantRouteKind.email,
+        routeKey: plaudSenderEmail,
+        crmTenantId,
+        label: "Plaud sender → CRM tenant"
+      }
+    });
+    console.log(`Tenant router: ${router.routeKind}:${router.routeKey} → ${router.crmTenantId}`);
+  } else {
+    console.warn("Skipped tenant_routers seed — set CRM_DEMO_TENANT_ID");
+  }
 
   console.log("Seed completed");
-  console.log(`Automation tenant (Postgres): ${tenant.id}`);
-  console.log(`App: ${app.id}`);
-  console.log(`API Key: ${key.plaintext}`);
 }
 
 main()

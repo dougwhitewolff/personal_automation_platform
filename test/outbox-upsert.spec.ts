@@ -10,7 +10,7 @@ describe("OutboxService upsert", () => {
     await svc.upsertIncomingEmail({
       tenantId: "t1",
       appId: "a1",
-      integrationId: "i1",
+      mailboxWatchId: "watch-1",
       providerEmailId: "graph-123",
       messageId: "<mid@example.com>",
       emailPayload: {

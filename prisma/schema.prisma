@@ -7,197 +7,66 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum CaptureStatus {
-  RECEIVED
-  PARSED
-  NEEDS_ATTENTION
-}
-
-enum ReviewStatus {
-  PENDING
-  CONFIRMED
-  REJECTED
-}
-
 enum OutboxStatus {
   PENDING
   SENT
   FAILED
 }
 
-/// Automation-platform tenant (referenced by tenant_id on app tables).
-model AutomationTenant {
-  id           String   @id @default(cuid())
-  name         String   @db.VarChar(255)
-  clientEmail  String?  @unique @map("client_email") @db.VarChar(254)
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
-  clientApps   ClientApp[]
-  integrations Integration[]
-  apiKeys      ServiceApiKey[]
-  captures     CaptureEvent[]
-  reviews      ReviewItem[]
-  audits       AuditEvent[]
-  workflowRuns WorkflowRun[]
-
-  @@map("automation_tenants")
-}
-
-model ClientApp {
-  id        String   @id @default(cuid())
-  tenantId  String   @map("tenant_id")
-  name      String   @db.VarChar(255)
-  slug      String   @db.VarChar(100)
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-  tenant    AutomationTenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-
-  @@unique([tenantId, slug])
-  @@index([tenantId])
-  @@map("client_apps")
-}
-
-model ServiceApiKey {
-  id         String    @id @default(cuid())
-  tenantId   String    @map("tenant_id")
-  appId      String    @map("app_id")
-  keyHash    String    @map("key_hash") @db.VarChar(255)
-  keyPrefix  String    @map("key_prefix") @db.VarChar(32)
-  label      String    @db.VarChar(255)
-  scopes     String[]
-  createdAt  DateTime  @default(now()) @map("created_at")
-  rotatedAt  DateTime? @map("rotated_at")
-  tenant     AutomationTenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-
-  @@index([tenantId, appId])
-  @@map("service_api_keys")
-}
-
-model Integration {
-  id              String   @id @default(cuid())
-  tenantId        String   @map("tenant_id")
-  appId           String   @map("app_id")
-  provider        String   @db.VarChar(100)
-  mailboxAddress  String   @map("mailbox_address") @db.VarChar(254)
-  configJson      Json?    @map("config_json")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
-  tenant          AutomationTenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-
-  @@unique([provider, mailboxAddress])
-  @@index([tenantId, appId])
-  @@map("integrations")
-}
-
-model CaptureEvent {
-  id               String        @id @default(cuid())
-  tenantId         String        @map("tenant_id")
-  appId            String        @map("app_id")
-  integrationId    String?       @map("integration_id")
-  sourceMessageId  String        @map("source_message_id") @db.VarChar(500)
-  sourceFrom       String        @map("source_from") @db.VarChar(500)
-  sourceTo         String        @map("source_to") @db.VarChar(500)
-  subject          String        @db.VarChar(1000)
-  bodyText         String?       @map("body_text") @db.Text
-  bodyHtml         String?       @map("body_html") @db.Text
-  summaryText      String?       @map("summary_text") @db.Text
-  transcriptText   String?       @map("transcript_text") @db.Text
-  attachmentMeta   Json?         @map("attachment_meta")
-  status           CaptureStatus @default(RECEIVED)
-  parserError      String?       @map("parser_error") @db.Text
-  receivedAt       DateTime      @map("received_at")
-  createdAt        DateTime      @default(now()) @map("created_at")
-  updatedAt        DateTime      @updatedAt @map("updated_at")
-  tenant           AutomationTenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  reviews          ReviewItem[]
-  audits           AuditEvent[]
-
-  @@unique([tenantId, sourceMessageId])
-  @@index([tenantId, appId, status])
-  @@map("capture_events")
-}
-
-model ReviewItem {
-  id              String       @id @default(cuid())
-  tenantId        String       @map("tenant_id")
-  appId           String       @map("app_id")
-  captureEventId  String       @map("capture_event_id")
-  status          ReviewStatus @default(PENDING)
-  proposedAction  String       @map("proposed_action") @db.VarChar(255)
-  proposedPayload Json         @map("proposed_payload")
-  actorUserId     String?      @map("actor_user_id") @db.VarChar(255)
-  actorEmail      String?      @map("actor_email") @db.VarChar(254)
-  decidedAt       DateTime?    @map("decided_at")
-  createdAt       DateTime     @default(now()) @map("created_at")
-  updatedAt       DateTime     @updatedAt @map("updated_at")
-  tenant          AutomationTenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  captureEvent    CaptureEvent @relation(fields: [captureEventId], references: [id], onDelete: Cascade)
-
-  @@unique([captureEventId])
-  @@index([tenantId, appId, status])
-  @@map("review_items")
-}
-
-model AuditEvent {
-  id             String   @id @default(cuid())
-  tenantId       String   @map("tenant_id")
-  appId          String   @map("app_id")
-  captureEventId String?  @map("capture_event_id")
-  reviewItemId   String?  @map("review_item_id")
-  eventType      String   @map("event_type") @db.VarChar(100)
-  payload        Json?
-  createdAt      DateTime @default(now()) @map("created_at")
-  tenant         AutomationTenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  captureEvent   CaptureEvent? @relation(fields: [captureEventId], references: [id], onDelete: SetNull)
-
-  @@index([tenantId, appId, eventType])
-  @@map("audit_events")
-}
-
-model WorkflowRun {
-  id              String   @id @default(cuid())
-  tenantId        String   @map("tenant_id")
-  appId           String   @map("app_id")
-  captureEventId  String?  @map("capture_event_id")
-  reviewItemId    String?  @map("review_item_id")
-  provider        String   @db.VarChar(100)
-  providerRunId   String   @map("provider_run_id") @db.VarChar(255)
-  createdAt       DateTime @default(now()) @map("created_at")
-  tenant          AutomationTenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-
-  @@unique([provider, providerRunId])
-  @@index([tenantId, appId])
-  @@map("workflow_runs")
+enum TenantRouteKind {
+  email
+  device_id
 }
 
 model OutboxEmail {
-  id               String       @id @default(cuid())
-  tenantId         String       @map("tenant_id")
-  appId            String       @map("app_id")
-  integrationId    String?      @map("integration_id")
-  providerEmailId  String       @map("provider_email_id") @db.VarChar(500)
-  crmTenantId      String?      @map("crm_tenant_id") @db.Uuid
-  messageId        String       @map("message_id") @db.VarChar(500)
-  emailPayload     Json         @map("email_payload")
-  status           OutboxStatus @default(PENDING)
-  attempts         Int          @default(0)
-  lastError        String?      @map("last_error") @db.VarChar(2000)
-  createdAt        DateTime     @default(now()) @map("created_at")
-  updatedAt        DateTime     @updatedAt @map("updated_at")
-  publishedAt      DateTime?    @map("published_at")
+  id              String       @id @default(cuid())
+  tenantId        String       @map("tenant_id")
+  appId           String       @map("app_id")
+  mailboxWatchId  String?      @map("mailbox_watch_id")
+  crmTenantId     String?      @map("crm_tenant_id") @db.Uuid
+  providerEmailId String       @map("provider_email_id") @db.VarChar(500)
+  messageId       String       @map("message_id") @db.VarChar(500)
+  emailPayload    Json         @map("email_payload")
+  status          OutboxStatus @default(PENDING)
+  attempts        Int          @default(0)
+  lastError       String?      @map("last_error") @db.VarChar(2000)
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+  publishedAt     DateTime?    @map("published_at")
+
+  mailboxWatch MailboxWatch? @relation(fields: [mailboxWatchId], references: [id], onDelete: SetNull)
 
   @@unique([tenantId, providerEmailId])
   @@index([status, createdAt])
   @@map("outbox_emails")
 }
 
-model CrmTenantEmailMapping {
-  id           String   @id @default(cuid())
-  sourceEmail  String   @unique @map("source_email") @db.VarChar(254)
-  crmTenantId  String   @map("crm_tenant_id") @db.Uuid
-  label        String?  @db.VarChar(255)
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+/// Maps an inbound identifier (Plaud sender email, device id, etc.) to downstream service tenant ids.
+model TenantRouter {
+  id          String          @id @default(cuid())
+  routeKind   TenantRouteKind @map("route_kind")
+  routeKey    String          @map("route_key") @db.VarChar(320)
+  crmTenantId String?         @map("crm_tenant_id") @db.Uuid
+  label       String?         @db.VarChar(255)
+  createdAt   DateTime        @default(now()) @map("created_at")
+  updatedAt   DateTime        @updatedAt @map("updated_at")
 
-  @@map("crm_tenant_email_mappings")
+  @@unique([routeKind, routeKey])
+  @@map("tenant_routers")
+}
+
+/// Mailboxes polled via Microsoft Graph (credentials per watched inbox).
+model MailboxWatch {
+  id               String        @id @default(cuid())
+  mailboxAddress   String        @unique @map("mailbox_address") @db.VarChar(254)
+  m365TenantId     String        @map("m365_tenant_id") @db.VarChar(64)
+  m365ClientId     String        @map("m365_client_id") @db.VarChar(64)
+  m365ClientSecret String        @map("m365_client_secret") @db.Text
+  enabled          Boolean       @default(true)
+  label            String?       @db.VarChar(255)
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+  outboxEmails     OutboxEmail[]
+
+  @@map("mailbox_watches")
 }

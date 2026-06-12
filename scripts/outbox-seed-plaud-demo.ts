@@ -1,4 +1,4 @@
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, TenantRouteKind } from "@prisma/client";
 import * as fs from "fs";
 import * as path from "path";
 import { extractAddressFromFromHeader } from "../src/outbox/extract-source-email";
@@ -12,13 +12,21 @@ const DEMO_TRANSCRIPT_LEAD = `I just finished a site visit with John Smith at Ac
 /** Demo spoken text for CRM Chad → tasks.create. */
 const DEMO_TRANSCRIPT_TASK = `Reminder for me: call John Smith at Acme Roofing tomorrow at 10 AM about the roof estimate we discussed. Make it a follow-up task, high priority.`;
 
-type DemoScenario = "lead" | "task";
+/**
+ * One transcript → multi-step plan: contacts.create → leads.create → tasks.create
+ * (step refs like {{step1.id}}). Use for Plaud review queue end-to-end testing.
+ */
+const DEMO_TRANSCRIPT_COMBO = `Just met Maria Lopez from Lopez Fencing at the home show. Her phone is 555-987-6543 and email is maria@lopezfencing.example. They want a perimeter fence quote, around twenty thousand dollars. Set a follow-up for me next Friday to call her back about the estimate.`;
+
+type DemoScenario = "lead" | "task" | "combo";
 
 function parseScenarioArg(): DemoScenario {
   const flag = process.argv.find((a) => a.startsWith("--scenario="));
   const value = flag?.split("=")[1]?.toLowerCase();
+  if (value === "lead") return "lead";
   if (value === "task") return "task";
-  return "lead";
+  if (value === "combo" || value === "full" || value === "all") return "combo";
+  return "combo";
 }
 
 function buildPlaudEmailBody(transcript: string): string {
@@ -31,6 +39,34 @@ function buildPlaudEmailBody(transcript: string): string {
   ].join("\n");
 }
 
+function scenarioMeta(scenario: DemoScenario): {
+  transcript: string;
+  subject: string;
+  expectHint: string;
+} {
+  switch (scenario) {
+    case "task":
+      return {
+        transcript: DEMO_TRANSCRIPT_TASK,
+        subject: "[Plaud-AutoFlow] Demo — follow-up task",
+        expectHint: "Plan should include tasks.create (optionally linked to an existing lead)."
+      };
+    case "combo":
+      return {
+        transcript: DEMO_TRANSCRIPT_COMBO,
+        subject: "[Plaud-AutoFlow] Demo — contact + lead + task",
+        expectHint:
+          "Plan should include contacts.create → leads.create → tasks.create with {{stepN.id}} dependencies. Confirm once to create all three."
+      };
+    default:
+      return {
+        transcript: DEMO_TRANSCRIPT_LEAD,
+        subject: "[Plaud-AutoFlow] Demo — new lead site visit",
+        expectHint: "Plan should center on leads.create (may include contact/task depending on LLM)."
+      };
+  }
+}
+
 async function main() {
   const prisma = new PrismaClient();
   const crmTenantId = process.env.CRM_DEMO_TENANT_ID;
@@ -40,8 +76,7 @@ async function main() {
   }
 
   const scenario = parseScenarioArg();
-  const transcript =
-    scenario === "task" ? DEMO_TRANSCRIPT_TASK : DEMO_TRANSCRIPT_LEAD;
+  const { transcript, subject, expectHint } = scenarioMeta(scenario);
 
   const fixturePath = path.join(__dirname, "../docs/fixtures/plaud/sample-email-body.txt");
   const fixtureBody = fs.existsSync(fixturePath)
@@ -51,10 +86,13 @@ async function main() {
 
   const sourceEmail = extractAddressFromFromHeader(DEMO_FROM) ?? DEMO_FROM.toLowerCase();
 
-  await prisma.crmTenantEmailMapping.upsert({
-    where: { sourceEmail },
+  await prisma.tenantRouter.upsert({
+    where: {
+      routeKind_routeKey: { routeKind: TenantRouteKind.email, routeKey: sourceEmail }
+    },
     create: {
-      sourceEmail,
+      routeKind: TenantRouteKind.email,
+      routeKey: sourceEmail,
       crmTenantId,
       label: "Demo Plaud → CRM tenant (seed script)"
     },
@@ -63,15 +101,10 @@ async function main() {
       label: "Demo Plaud → CRM tenant (seed script)"
     }
   });
-  console.log(`Upserted crm_tenant_email_mappings: ${sourceEmail} → ${crmTenantId}`);
+  console.log(`Upserted tenant_routers: email:${sourceEmail} → ${crmTenantId}`);
 
   const providerEmailId = `demo-plaud-${scenario}-${Date.now()}`;
   const messageId = `demo-msg-${scenario}-${Date.now()}@plaud.demo`;
-
-  const subject =
-    scenario === "task"
-      ? "[Plaud-AutoFlow] Demo — follow-up task"
-      : "[Plaud-AutoFlow] Demo — new lead site visit";
 
   const emailPayload = {
     from: `Plaud <${DEMO_FROM}>`,
@@ -100,6 +133,7 @@ async function main() {
 
   console.log(`Created PENDING outbox_emails row: ${row.id}`);
   console.log(`Scenario: ${scenario}`);
+  console.log(`Expect: ${expectHint}`);
   console.log(`Transcript (${transcript.length} chars):`);
   console.log(transcript);
   if (fixtureBody) {
@@ -107,7 +141,10 @@ async function main() {
   }
   console.log(`Run the automation platform so the cron relay publishes to Kafka.`);
   console.log(`CRM expects payload.transcript on plaud.email.inbound events.`);
-  console.log(`Usage: npx ts-node scripts/outbox-seed-plaud-demo.ts [--scenario=lead|task]`);
+  console.log(
+    `Usage: npx tsx scripts/outbox-seed-plaud-demo.ts [--scenario=combo|lead|task]`
+  );
+  console.log(`  combo (default): contact + lead + task in one plan`);
   await prisma.$disconnect();
 }
 

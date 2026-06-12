@@ -1,12 +1,21 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { GraphAttachment, GraphMessage } from "./m365.types";
 
+export type M365MailboxCredentials = {
+  m365TenantId: string;
+  m365ClientId: string;
+  m365ClientSecret: string;
+};
+
 @Injectable()
 export class M365GraphClient {
   private readonly logger = new Logger(M365GraphClient.name);
 
-  async fetchRecentMessages(userEmail: string): Promise<GraphMessage[]> {
-    const token = await this.getToken();
+  async fetchRecentMessages(
+    credentials: M365MailboxCredentials,
+    userEmail: string
+  ): Promise<GraphMessage[]> {
+    const token = await this.getToken(credentials);
     if (!token) return [];
 
     const endpoint = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(userEmail)}/messages?$top=10&$orderby=receivedDateTime desc`;
@@ -15,7 +24,7 @@ export class M365GraphClient {
     });
 
     if (!response.ok) {
-      this.logger.warn(`Graph messages fetch failed: ${response.status}`);
+      this.logger.warn(`Graph messages fetch failed for ${userEmail}: ${response.status}`);
       return [];
     }
 
@@ -23,8 +32,12 @@ export class M365GraphClient {
     return json.value ?? [];
   }
 
-  async fetchAttachments(userEmail: string, messageId: string): Promise<GraphAttachment[]> {
-    const token = await this.getToken();
+  async fetchAttachments(
+    credentials: M365MailboxCredentials,
+    userEmail: string,
+    messageId: string
+  ): Promise<GraphAttachment[]> {
+    const token = await this.getToken(credentials);
     if (!token) return [];
 
     const endpoint = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(userEmail)}/messages/${messageId}/attachments`;
@@ -33,7 +46,7 @@ export class M365GraphClient {
     });
 
     if (!response.ok) {
-      this.logger.warn(`Graph attachment fetch failed: ${response.status}`);
+      this.logger.warn(`Graph attachment fetch failed for ${userEmail}: ${response.status}`);
       return [];
     }
 
@@ -41,28 +54,29 @@ export class M365GraphClient {
     return json.value ?? [];
   }
 
-  private async getToken(): Promise<string | null> {
-    const tenantId = process.env.M365_TENANT_ID;
-    const clientId = process.env.M365_CLIENT_ID;
-    const clientSecret = process.env.M365_CLIENT_SECRET;
-    if (!tenantId || !clientId || !clientSecret) {
-      this.logger.warn("M365 creds are missing; skipping mailbox poll");
+  private async getToken(credentials: M365MailboxCredentials): Promise<string | null> {
+    const { m365TenantId, m365ClientId, m365ClientSecret } = credentials;
+    if (!m365TenantId || !m365ClientId || !m365ClientSecret) {
+      this.logger.warn("M365 mailbox credentials are incomplete; skipping Graph call");
       return null;
     }
 
-    const tokenResponse = await fetch(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "client_credentials",
-        client_id: clientId,
-        client_secret: clientSecret,
-        scope: "https://graph.microsoft.com/.default"
-      })
-    });
+    const tokenResponse = await fetch(
+      `https://login.microsoftonline.com/${m365TenantId}/oauth2/v2.0/token`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "client_credentials",
+          client_id: m365ClientId,
+          client_secret: m365ClientSecret,
+          scope: "https://graph.microsoft.com/.default"
+        })
+      }
+    );
 
     if (!tokenResponse.ok) {
-      this.logger.warn(`Token request failed: ${tokenResponse.status}`);
+      this.logger.warn(`Token request failed for tenant ${m365TenantId}: ${tokenResponse.status}`);
       return null;
     }
 

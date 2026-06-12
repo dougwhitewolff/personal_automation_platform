@@ -6,9 +6,13 @@ import { OutboxRelayService } from "./outbox-relay.service";
 
 @Module({
   providers: [
-    OutboxService,
     KafkaProducerService,
-    // Explicit factory: tsup bundles dist/main.js and breaks emitDecoratorMetadata for multi-arg constructors.
+    // Explicit factories: tsup bundles dist/main.js and breaks emitDecoratorMetadata for constructors.
+    {
+      provide: OutboxService,
+      inject: [PrismaService],
+      useFactory: (prisma: PrismaService) => new OutboxService(prisma),
+    },
     {
       provide: OutboxRelayService,
       inject: [PrismaService, KafkaProducerService],

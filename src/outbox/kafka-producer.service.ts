@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
-import { Kafka, logLevel, type Producer } from "kafkajs";
+import { Kafka, type Producer } from "kafkajs";
+import { buildKafkaJsConfig, isKafkaSaslEnabled, parseKafkaBrokers } from "./kafka-client.config";
 
 @Injectable()
 export class KafkaProducerService implements OnModuleInit, OnModuleDestroy {
@@ -8,11 +9,7 @@ export class KafkaProducerService implements OnModuleInit, OnModuleDestroy {
   private producer: Producer | null = null;
 
   private get brokers(): string[] {
-    const raw = process.env.KAFKA_BROKERS ?? "";
-    return raw
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    return parseKafkaBrokers(process.env.KAFKA_BROKERS ?? "");
   }
 
   get enabled(): boolean {
@@ -25,13 +22,16 @@ export class KafkaProducerService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     const clientId = process.env.KAFKA_CLIENT_ID ?? "personal-automation-platform";
-    this.kafka = new Kafka({
-      clientId,
-      brokers: this.brokers,
-      logLevel: logLevel.WARN
-    });
+    this.kafka = new Kafka(
+      buildKafkaJsConfig({
+        clientId,
+        brokers: this.brokers,
+        saslUsername: process.env.KAFKA_SASL_USERNAME,
+        saslPassword: process.env.KAFKA_SASL_PASSWORD
+      })
+    );
     this.producer = this.kafka.producer({
-      allowAutoTopicCreation: true,
+      allowAutoTopicCreation: !isKafkaSaslEnabled(process.env.KAFKA_SASL_USERNAME),
       idempotent: true,
       maxInFlightRequests: 1
     });
