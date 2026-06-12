@@ -68,6 +68,12 @@ The previous Python implementation was wiped from `main`. It is preserved at:
 
 To inspect the legacy code: `git checkout legacy-python-v1`.
 
+## Local database (PostgreSQL)
+
+- **Docker:** `docker compose up -d` — Postgres on port **5434**, database `personal_automation` (see [docker-compose.yml](docker-compose.yml)).
+- **Env:** set `DATABASE_URL` in `.env` (see [.env.example](.env.example)), then `npx prisma migrate deploy` and optionally `npm run prisma:seed`.
+- **GUI:** [docs/DATABASE_GUI.md](docs/DATABASE_GUI.md) — Prisma Studio and other tools.
+
 ## Documentation
 
 - [docs/DEV_HANDOFF_PRD.md](docs/DEV_HANDOFF_PRD.md) - concise developer handoff PRD and current source of truth
