@@ -2,6 +2,22 @@ import type { PrismaService } from "../infrastructure/prisma.service";
 import { extractAddressFromFromHeader } from "../outbox/extract-source-email";
 import { TenantRouteKind } from "@prisma/client";
 
+export async function resolveCrmTenantIdFromMailboxWatchId(
+  prisma: PrismaService,
+  mailboxWatchId: string | null | undefined
+): Promise<string | null> {
+  if (!mailboxWatchId?.trim()) {
+    return null;
+  }
+
+  const watch = await prisma.mailboxWatch.findUnique({
+    where: { id: mailboxWatchId },
+    include: { tenantRouter: true }
+  });
+
+  return watch?.tenantRouter?.crmTenantId ?? null;
+}
+
 export async function resolveCrmTenantIdFromRouter(
   prisma: PrismaService,
   routeKind: TenantRouteKind,

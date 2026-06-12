@@ -41,15 +41,16 @@ model OutboxEmail {
   @@map("outbox_emails")
 }
 
-/// Maps an inbound identifier (Plaud sender email, device id, etc.) to downstream service tenant ids.
+/// Maps an inbound identifier (watched mailbox, device id, etc.) to downstream CRM tenant ids.
 model TenantRouter {
-  id          String          @id @default(cuid())
-  routeKind   TenantRouteKind @map("route_kind")
-  routeKey    String          @map("route_key") @db.VarChar(320)
-  crmTenantId String?         @map("crm_tenant_id") @db.Uuid
-  label       String?         @db.VarChar(255)
-  createdAt   DateTime        @default(now()) @map("created_at")
-  updatedAt   DateTime        @updatedAt @map("updated_at")
+  id             String          @id @default(cuid())
+  routeKind      TenantRouteKind @map("route_kind")
+  routeKey       String          @map("route_key") @db.VarChar(320)
+  crmTenantId    String?         @map("crm_tenant_id") @db.Uuid
+  label          String?         @db.VarChar(255)
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime        @updatedAt @map("updated_at")
+  mailboxWatches MailboxWatch[]
 
   @@unique([routeKind, routeKey])
   @@map("tenant_routers")
@@ -58,6 +59,7 @@ model TenantRouter {
 /// Mailboxes polled via Microsoft Graph (credentials per watched inbox).
 model MailboxWatch {
   id               String        @id @default(cuid())
+  tenantRouterId   String        @map("tenant_router_id")
   mailboxAddress   String        @unique @map("mailbox_address") @db.VarChar(254)
   m365TenantId     String        @map("m365_tenant_id") @db.VarChar(64)
   m365ClientId     String        @map("m365_client_id") @db.VarChar(64)
@@ -66,6 +68,7 @@ model MailboxWatch {
   label            String?       @db.VarChar(255)
   createdAt        DateTime      @default(now()) @map("created_at")
   updatedAt        DateTime      @updatedAt @map("updated_at")
+  tenantRouter     TenantRouter  @relation(fields: [tenantRouterId], references: [id], onDelete: Restrict)
   outboxEmails     OutboxEmail[]
 
   @@map("mailbox_watches")

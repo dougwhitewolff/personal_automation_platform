@@ -9,17 +9,15 @@ describe("integrations mailbox poll", () => {
       m365TenantId: "azure-tenant",
       m365ClientId: "client-id",
       m365ClientSecret: "client-secret",
-      enabled: true
+      enabled: true,
+      tenantRouter: {
+        crmTenantId: "00000000-0000-0000-0000-000000000001"
+      }
     };
 
     const prisma = {
       mailboxWatch: {
         findMany: vi.fn().mockResolvedValue([watch])
-      },
-      tenantRouter: {
-        findUnique: vi.fn().mockResolvedValue({
-          crmTenantId: "00000000-0000-0000-0000-000000000001"
-        })
       }
     };
     const outboxService = { upsertIncomingEmail: vi.fn().mockResolvedValue({ id: "ob1" }) };

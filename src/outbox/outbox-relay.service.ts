@@ -3,7 +3,7 @@ import { Cron, CronExpression } from "@nestjs/schedule";
 import { PrismaService } from "../infrastructure/prisma.service";
 import { KafkaProducerService } from "./kafka-producer.service";
 import { extractTranscriptFromBody, parsePlaudEmail } from "../captures/plaud-parser";
-import { resolveCrmTenantIdFromEmailFrom } from "../tenant-router/resolve-crm-tenant";
+import { resolveCrmTenantIdFromEmailFrom, resolveCrmTenantIdFromMailboxWatchId } from "../tenant-router/resolve-crm-tenant";
 import {
   extractFromFromEmailPayload,
   getPlaudSenderEmailFromEnv,
@@ -89,10 +89,13 @@ export class OutboxRelayService {
 
         const crmTenantId =
           row.crmTenantId ??
+          (await resolveCrmTenantIdFromMailboxWatchId(this.prisma, row.mailboxWatchId)) ??
           (await this.resolveCrmTenantIdFromEmailPayload(emailPayload)) ??
           process.env.CRM_DEMO_TENANT_ID;
         if (!crmTenantId) {
-          throw new Error("No CRM tenant id for Plaud email (set CRM_DEMO_TENANT_ID or tenant_routers)");
+          throw new Error(
+            "No CRM tenant id for Plaud email (link mailbox_watches.tenant_router_id or set CRM_DEMO_TENANT_ID)"
+          );
         }
 
         const transcript = resolvePlatformTranscript(emailPayload);

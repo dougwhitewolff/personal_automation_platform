@@ -8,7 +8,7 @@ import { stableDevProviderEmailId } from "../outbox/stable-dev-id";
 import { decodeAttachmentTextContent } from "./decode-attachment-text";
 import { getPlaudSenderEmailFromEnv, matchesPlaudSender } from "./plaud-sender";
 import { PLATFORM_APP_ID } from "../common/platform-constants";
-import { resolveCrmTenantIdFromEmailFrom } from "../tenant-router/resolve-crm-tenant";
+import { resolveCrmTenantIdFromMailboxWatchId } from "../tenant-router/resolve-crm-tenant";
 import type { NormalizedEmail } from "./normalized-email.type";
 
 @Injectable()
@@ -33,7 +33,8 @@ export class IntegrationsService {
   }) {
     const mailboxAddress = payload.to.trim().toLowerCase();
     const mailbox = await this.prisma.mailboxWatch.findUnique({
-      where: { mailboxAddress }
+      where: { mailboxAddress },
+      include: { tenantRouter: true }
     });
 
     if (!mailbox) {
@@ -68,7 +69,7 @@ export class IntegrationsService {
     });
 
     const crmTenantId =
-      (await resolveCrmTenantIdFromEmailFrom(this.prisma, payload.from)) ??
+      mailbox.tenantRouter?.crmTenantId ??
       process.env.CRM_DEMO_TENANT_ID?.trim() ??
       undefined;
 
@@ -87,6 +88,7 @@ export class IntegrationsService {
   async pollM365Mailbox(): Promise<void> {
     const watches = await this.prisma.mailboxWatch.findMany({
       where: { enabled: true },
+      include: { tenantRouter: true },
       orderBy: { mailboxAddress: "asc" }
     });
 
@@ -155,7 +157,7 @@ export class IntegrationsService {
           };
 
           const crmTenantId =
-            (await resolveCrmTenantIdFromEmailFrom(this.prisma, fromAddress)) ??
+            watch.tenantRouter?.crmTenantId ??
             process.env.CRM_DEMO_TENANT_ID?.trim() ??
             undefined;
 

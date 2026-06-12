@@ -7,7 +7,7 @@ export type UpsertIncomingEmailInput = {
   tenantId: string;
   appId: string;
   mailboxWatchId?: string;
-  /** CRM tenants.id UUID — set from CRM_DEMO_TENANT_ID during mailbox poll. */
+  /** CRM tenants.id UUID — set from the linked tenant router during mailbox poll. */
   crmTenantId?: string;
   /** Graph message id or dev synthetic — dedupe key with tenantId. */
   providerEmailId: string;

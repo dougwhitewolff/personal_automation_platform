@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { TenantRouteKind } from "@prisma/client";
 import { OutboxRelayService } from "../src/outbox/outbox-relay.service";
 
 const PLAUD_FROM = "Plaud <no-reply@plaud.ai>";
@@ -66,7 +65,7 @@ describe("OutboxRelayService", () => {
     });
   });
 
-  it("resolves CRM tenant from tenant_routers when outbox row has no crmTenantId", async () => {
+  it("resolves CRM tenant from mailbox watch tenant router when outbox row has no crmTenantId", async () => {
     vi.stubEnv("PLAUD_SENDER_EMAIL", "noreply@plaud.ai");
 
     const row = {
@@ -74,7 +73,7 @@ describe("OutboxRelayService", () => {
       tenantId: "t1",
       crmTenantId: null,
       appId: "a1",
-      mailboxWatchId: null,
+      mailboxWatchId: "watch-1",
       providerEmailId: "graph-msg-2",
       messageId: "<mid2@example.com>",
       emailPayload: { from: "Plaud <noreply@plaud.ai>", subject: "x" },
@@ -88,16 +87,17 @@ describe("OutboxRelayService", () => {
 
     const findMany = vi.fn().mockResolvedValue([row]);
     const update = vi.fn().mockResolvedValue(row);
-    const findUniqueRouter = vi.fn().mockResolvedValue({
-      id: "r1",
-      routeKind: TenantRouteKind.email,
-      routeKey: "noreply@plaud.ai",
-      crmTenantId: "00000000-0000-0000-0000-000000000099"
+    const findUniqueWatch = vi.fn().mockResolvedValue({
+      id: "watch-1",
+      tenantRouter: {
+        crmTenantId: "00000000-0000-0000-0000-000000000099"
+      }
     });
 
     const prisma = {
       outboxEmail: { findMany, update },
-      tenantRouter: { findUnique: findUniqueRouter }
+      mailboxWatch: { findUnique: findUniqueWatch },
+      tenantRouter: { findUnique: vi.fn() }
     };
 
     const kafka = {
@@ -108,13 +108,9 @@ describe("OutboxRelayService", () => {
     const relay = new OutboxRelayService(prisma as never, kafka as never);
     await relay.relayPendingToKafka();
 
-    expect(findUniqueRouter).toHaveBeenCalledWith({
-      where: {
-        routeKind_routeKey: {
-          routeKind: TenantRouteKind.email,
-          routeKey: "noreply@plaud.ai"
-        }
-      }
+    expect(findUniqueWatch).toHaveBeenCalledWith({
+      where: { id: "watch-1" },
+      include: { tenantRouter: true }
     });
 
     expect(kafka.sendJsonRecord).toHaveBeenCalledWith(
