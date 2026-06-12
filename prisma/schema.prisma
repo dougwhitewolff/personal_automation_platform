@@ -1,0 +1,72 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum OutboxStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+enum TenantRouteKind {
+  email
+  device_id
+}
+
+model OutboxEmail {
+  id              String       @id @default(cuid())
+  tenantId        String       @map("tenant_id")
+  appId           String       @map("app_id")
+  mailboxWatchId  String?      @map("mailbox_watch_id")
+  crmTenantId     String?      @map("crm_tenant_id") @db.Uuid
+  providerEmailId String       @map("provider_email_id") @db.VarChar(500)
+  messageId       String       @map("message_id") @db.VarChar(500)
+  emailPayload    Json         @map("email_payload")
+  status          OutboxStatus @default(PENDING)
+  attempts        Int          @default(0)
+  lastError       String?      @map("last_error") @db.VarChar(2000)
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+  publishedAt     DateTime?    @map("published_at")
+
+  mailboxWatch MailboxWatch? @relation(fields: [mailboxWatchId], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, providerEmailId])
+  @@index([status, createdAt])
+  @@map("outbox_emails")
+}
+
+/// Maps an inbound identifier (Plaud sender email, device id, etc.) to downstream service tenant ids.
+model TenantRouter {
+  id          String          @id @default(cuid())
+  routeKind   TenantRouteKind @map("route_kind")
+  routeKey    String          @map("route_key") @db.VarChar(320)
+  crmTenantId String?         @map("crm_tenant_id") @db.Uuid
+  label       String?         @db.VarChar(255)
+  createdAt   DateTime        @default(now()) @map("created_at")
+  updatedAt   DateTime        @updatedAt @map("updated_at")
+
+  @@unique([routeKind, routeKey])
+  @@map("tenant_routers")
+}
+
+/// Mailboxes polled via Microsoft Graph (credentials per watched inbox).
+model MailboxWatch {
+  id               String        @id @default(cuid())
+  mailboxAddress   String        @unique @map("mailbox_address") @db.VarChar(254)
+  m365TenantId     String        @map("m365_tenant_id") @db.VarChar(64)
+  m365ClientId     String        @map("m365_client_id") @db.VarChar(64)
+  m365ClientSecret String        @map("m365_client_secret") @db.Text
+  enabled          Boolean       @default(true)
+  label            String?       @db.VarChar(255)
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+  outboxEmails     OutboxEmail[]
+
+  @@map("mailbox_watches")
+}
